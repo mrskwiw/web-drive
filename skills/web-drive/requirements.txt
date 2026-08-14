@@ -1,0 +1,7 @@
+# web-qa engine — runtime
+playwright==1.48.0
+click==8.1.7
+
+# tests
+pytest==8.3.3
+pytest-asyncio==0.24.0
