@@ -19,6 +19,7 @@ Design notes worth keeping:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any, List, Optional, Set, Tuple
 from urllib.parse import urldefrag, urljoin, urlparse
@@ -32,6 +33,36 @@ from .catalog import AuthState, RouteNode, SiteMap
 _LOGIN_SEGMENTS = frozenset(
     {"login", "signin", "sign-in", "auth", "authenticate", "session", "sso"}
 )
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+)
+_HEX_RE = re.compile(r"^[0-9a-f]{16,}$", re.I)
+
+
+def templatize(path: str) -> str:
+    """Collapse a concrete path to its route TEMPLATE.
+
+    ``/quiz/0b9ed04c-accd-...`` and ``/quiz/e3cb7b60-9b92-...`` are not two
+    routes; they are one route with two arguments. Treating them as distinct is
+    what makes a crawl of a content-heavy site unfinishable — twenty instances of
+    one template consume the entire request budget while adding nothing a driver
+    could use. The generated CLI wants `quiz show --id X`, not twenty URLs.
+    """
+    out: List[str] = []
+    for seg in path.split("/"):
+        if not seg:
+            out.append(seg)
+        elif _UUID_RE.match(seg):
+            out.append("{uuid}")
+        elif seg.isdigit():
+            out.append("{int}")
+        elif _HEX_RE.match(seg):
+            out.append("{hex}")
+        else:
+            out.append(seg)
+    return "/".join(out) or "/"
 
 
 def origin_of(url: str) -> str:
@@ -121,6 +152,7 @@ async def crawl(
     max_retries: int = 3,
     backoff_ms: int = 2000,
     max_rpm: int = 120,
+    max_per_template: int = 3,
     resume: Optional[dict] = None,
 ) -> SiteMap:
     """Breadth-first walk of the same-origin route graph from ``entry_url``.
@@ -153,6 +185,8 @@ async def crawl(
         seen: Set[str] = {normalize(r.url) for r in site.routes} | {q[0] for q in queue}
         skipped_seen: Set[str] = {s_["url"] for s_ in site.skipped}
         site.frontier = []
+        template_seen = dict(resume.get("_template_seen", {}))
+        collapsed = dict(resume.get("_collapsed", {}))
         # A resumed run re-reports its own trust flags; a stale `rate_limited`
         # from the previous leg would mislabel a clean continuation.
         site.rate_limited = False
@@ -164,6 +198,8 @@ async def crawl(
         queue = [(start, 0, "entry")]
         seen = {start}
         skipped_seen = set()
+        template_seen = {}
+        collapsed = {}
     first = True
     fetched = 0  # routes actually visited THIS leg (resumed ones were not)
 
@@ -269,9 +305,19 @@ async def crawl(
                     skipped_seen.add(target)
                     site.skipped.append({"url": target, "reason": reason})
                 continue
-            if target not in seen:
-                seen.add(target)
-                queue.append((target, depth + 1, f"link:{link.text or link.href}"))
+            if target in seen:
+                continue
+            # Sample a bounded number of instances per route template. The rest
+            # are counted, not crawled: the map records that the template has N
+            # instances, which is the fact a driver needs, without paying N page
+            # loads to learn one page shape.
+            tmpl = templatize(urlparse(target).path or "/")
+            template_seen[tmpl] = template_seen.get(tmpl, 0) + 1
+            if template_seen[tmpl] > max_per_template:
+                collapsed[tmpl] = collapsed.get(tmpl, 0) + 1
+                continue
+            seen.add(target)
+            queue.append((target, depth + 1, f"link:{link.text or link.href}"))
 
     # Whatever is still queued travels with the result, so this map can be
     # handed straight back via --resume.
@@ -288,6 +334,22 @@ async def crawl(
         # per-route cost -- the one number a caller uses to choose --max-rpm.
         site.rate_limit.requests_per_route = site.rate_limit.requests_total / fetched
     site.rate_limit.throttled_requests = count_throttled(controller, baseline)
+    visited: dict[str, int] = {}
+    for r in site.routes:
+        t = templatize(r.path)
+        visited[t] = visited.get(t, 0) + 1
+    site.templates = [
+        {
+            "template": t,
+            "visited": visited.get(t, 0),
+            "instances_seen": template_seen.get(t, visited.get(t, 0)),
+            "collapsed": collapsed.get(t, 0),
+        }
+        for t in sorted(set(visited) | set(template_seen))
+    ]
+    site.collapsed_routes = sum(collapsed.values())
+    site._template_seen = template_seen
+    site._collapsed = collapsed
     return site
 
 

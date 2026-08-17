@@ -310,7 +310,9 @@ class BrowserController:
         nav_idle_ms: int = 3000,
         storage_state: Optional[Any] = None,
         user_agent: Optional[str] = None,
+        block_assets: bool = False,
     ) -> None:
+        self._block_assets = block_assets
         self._engine = engine
         self._headless = headless
         self._viewport = {"width": viewport_width, "height": viewport_height}
@@ -375,6 +377,21 @@ class BrowserController:
             # Playwright accepts either a state dict or a path to a state file.
             ctx_kwargs["storage_state"] = self._storage_state
         self._context = await self._browser.new_context(**ctx_kwargs)
+        if self._block_assets:
+            # Mapping only needs routes, titles and links. Images, fonts, media
+            # and stylesheets change none of those, but on an asset-heavy SPA they
+            # are the bulk of the per-page request count -- and requests are the
+            # unit a rate limiter meters. Scripts are NEVER blocked: the app is a
+            # client-rendered SPA and would render nothing without them.
+            await self._context.route(
+                "**/*",
+                lambda route: (
+                    route.abort()
+                    if route.request.resource_type
+                    in ("image", "font", "media", "stylesheet")
+                    else route.continue_()
+                ),
+            )
         self._page = await self.context.new_page()
         self.page.set_default_timeout(self._timeout)
         self._wire_listeners()

@@ -140,6 +140,14 @@ class SiteMap:
     # continued instead of restarted, which matters most precisely when the
     # target is rate-limited and re-walking what you already have is expensive.
     frontier: List[List[Any]] = field(default_factory=list)
+    # Route templates observed. `collapsed` counts instances deliberately NOT
+    # crawled once the per-template sample was met -- disclosed, like `capped`,
+    # because "we saw 20 of these and walked 3" is a different claim from
+    # "there are 3 of these".
+    templates: List[Dict[str, Any]] = field(default_factory=list)
+    collapsed_routes: int = 0
+    _template_seen: Dict[str, int] = field(default_factory=dict)
+    _collapsed: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -155,6 +163,10 @@ class SiteMap:
             "stopped_reason": self.stopped_reason,
             "rate_limit": self.rate_limit.to_dict(),
             "frontier": [list(f) for f in self.frontier],
+            "templates": list(self.templates),
+            "collapsed_routes": self.collapsed_routes,
+            "_template_seen": dict(self._template_seen),
+            "_collapsed": dict(self._collapsed),
             "routes": [r.to_dict() for r in self.routes],
             "skipped": list(self.skipped),
         }
@@ -175,4 +187,6 @@ class SiteMap:
         site.routes = [RouteNode.from_dict(r) for r in data.get("routes", [])]
         site.skipped = list(data.get("skipped", []))
         site.frontier = [list(f) for f in data.get("frontier", [])]
+        site._template_seen = dict(data.get("_template_seen", {}))
+        site._collapsed = dict(data.get("_collapsed", {}))
         return site

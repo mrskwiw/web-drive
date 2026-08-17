@@ -53,6 +53,7 @@ def _controller(
     headless: bool,
     session: str | None = None,
     user_agent: str | None = None,
+    block_assets: bool = False,
 ) -> BrowserController:
     """Build a controller, seeding a saved auth session when provided.
 
@@ -66,6 +67,7 @@ def _controller(
         headless=headless,
         storage_state=storage_state,
         user_agent=user_agent or session_ua,
+        block_assets=block_assets,
     )
 
 
@@ -106,6 +108,19 @@ def cli() -> None:
     "pause than a light one. 0 disables (not advised).",
 )
 @click.option(
+    "--block-assets/--no-block-assets",
+    default=True,
+    help="Abort image/font/media/stylesheet requests while mapping. They cannot "
+    "change routes, titles or links, but dominate the request count that rate "
+    "limiters meter. Scripts are never blocked -- an SPA needs them to render.",
+)
+@click.option(
+    "--max-per-template",
+    default=3,
+    help="How many instances of one route template (e.g. /quiz/{uuid}) to walk "
+    "before counting the rest as collapsed.",
+)
+@click.option(
     "--resume",
     "resume_path",
     type=click.Path(exists=True),
@@ -141,6 +156,8 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     delay_ms: int,
     max_retries: int,
     max_rpm: int,
+    block_assets: bool,
+    max_per_template: int,
     resume_path: str | None,
     session: str | None,
     user_agent: str | None,
@@ -169,7 +186,7 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     )
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent)
+        controller = _controller(engine, headless, session, user_agent, block_assets)
         await controller.launch()
         try:
             return await crawl(
@@ -180,6 +197,7 @@ def map(  # noqa: A001 — the subcommand really is called `map`
                 delay_ms=delay_ms,
                 max_retries=max_retries,
                 max_rpm=max_rpm,
+                max_per_template=max_per_template,
                 resume=resume,
                 with_session=session is not None,
             )

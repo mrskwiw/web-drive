@@ -423,3 +423,121 @@ def test_rate_limit_profile_records_where_throttling_began():
         "choose a budget from it"
     )
     assert rl["first_throttle_after_s"] is not None
+
+
+# -- route templating --------------------------------------------------------
+
+
+def test_templatize_collapses_identifier_segments():
+    from engine.sitemap import templatize
+
+    assert templatize("/quiz/0b9ed04c-accd-4724-9767-80860271bcad") == "/quiz/{uuid}"
+    assert templatize("/user/123") == "/user/{int}"
+    assert templatize("/o/" + "a1b2c3d4e5f60718") == "/o/{hex}"
+    # words that merely look id-ish must survive: collapsing a real route into a
+    # template would hide it from the map entirely
+    assert templatize("/quiz/create") == "/quiz/create"
+    assert templatize("/profile/mrsquirrel") == "/profile/mrsquirrel"
+    assert templatize("/") == "/"
+
+
+TEMPLATED = (
+    b"<!doctype html><title>Index</title><h1>Index</h1>"
+    + b"".join(
+        f"<a href='/item/{i:08d}-aaaa-bbbb-cccc-1234567890ab'>Item {i}</a>".encode()
+        for i in range(8)
+    )
+    + b"<a href='/about'>About</a>"
+)
+
+
+class _TemplateHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = (
+            b"<!doctype html><title>Item</title><h1>Item</h1>"
+            if self.path.startswith("/item/")
+            else (
+                b"<!doctype html><title>About</title><h1>About</h1>"
+                if self.path.startswith("/about")
+                else TEMPLATED
+            )
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _template_server():
+    srv = _Server(("127.0.0.1", 0), _TemplateHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_instances_of_one_template_are_sampled_not_all_walked():
+    """Eight instances of one route shape must cost three page loads, not eight.
+
+    This is what makes a content-heavy site mappable at all: without it the
+    request budget is spent re-learning one page shape, and the structural routes
+    beyond it are never reached. The count of what was skipped still travels with
+    the map, so "we saw 8 and walked 3" stays distinguishable from "there are 3".
+    """
+    with _template_server() as base:
+        site = _map(
+            base,
+            "--max-per-template",
+            "3",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--max-depth",
+            "2",
+        )
+
+    items = [r for r in site["routes"] if r["path"].startswith("/item/")]
+    assert len(items) == 3, f"walked {len(items)} instances, expected the 3-sample cap"
+    assert site["collapsed_routes"] == 5, site["collapsed_routes"]
+
+    by_t = {t["template"]: t for t in site["templates"]}
+    assert "/item/{uuid}" in by_t, sorted(by_t)
+    assert by_t["/item/{uuid}"]["instances_seen"] == 8
+    assert by_t["/item/{uuid}"]["collapsed"] == 5
+    # a non-templated sibling must NOT be collapsed away
+    assert "/about" in {r["path"] for r in site["routes"]}
+
+
+def test_asset_blocking_removes_asset_requests_but_keeps_routes():
+    """Blocking images/fonts/media cuts the request count -- the unit limiters
+    meter -- without changing what the map records."""
+    with _server() as base:
+        blocked = _map(base, "--delay-ms", "0", "--max-rpm", "0", "--max-pages", "3")
+        allowed = _map(
+            base,
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--max-pages",
+            "3",
+            "--no-block-assets",
+        )
+    assert {r["path"] for r in blocked["routes"]} == {
+        r["path"] for r in allowed["routes"]
+    }
+    assert (
+        blocked["rate_limit"]["requests_total"]
+        <= allowed["rate_limit"]["requests_total"]
+    )

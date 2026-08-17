@@ -1,6 +1,6 @@
 {
   "name": "web-drive",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Turns a live web app into a command-line tool an agent can operate: crawls the route graph, reconciles what each page claims against what navigation proves, verifies each candidate action by performing it, and generates a per-site CLI with named verbs, JSON output and real exit codes. Sibling of web-qa and web-replicate.",
   "author": {
     "name": "mrskwiw",
