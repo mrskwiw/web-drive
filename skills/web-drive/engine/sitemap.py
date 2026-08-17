@@ -19,6 +19,7 @@ Design notes worth keeping:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, List, Optional, Set, Tuple
 from urllib.parse import urldefrag, urljoin, urlparse
 
@@ -87,15 +88,40 @@ def count_throttled(controller: BrowserController, since: int) -> int:
     )  # noqa: SLF001
 
 
+async def pace(
+    controller: BrowserController, started: float, max_rpm: int, baseline: int
+) -> None:
+    """Hold the crawl to ``max_rpm`` REQUESTS per minute.
+
+    Pacing per route is the wrong unit and was the tuning gap the first live
+    re-run exposed: an asset-heavy SPA pulls ~15 requests per page, so ten
+    "politely spaced" pages is still ~150 requests and trips a limiter that
+    counts requests. This paces on what is actually being metered — the captured
+    request count — so a heavy page earns a longer pause than a light one, with
+    no need to know the page weight in advance.
+    """
+    if max_rpm <= 0:
+        return
+    made = controller.network_len() - baseline
+    if made <= 0:
+        return
+    earned = made / (max_rpm / 60.0)  # seconds this many requests should have taken
+    elapsed = time.monotonic() - started
+    if earned > elapsed:
+        await asyncio.sleep(earned - elapsed)
+
+
 async def crawl(
     controller: BrowserController,
     entry_url: str,
     max_pages: int = 40,
     max_depth: int = 3,
     with_session: bool = False,
-    delay_ms: int = 750,
+    delay_ms: int = 250,
     max_retries: int = 3,
     backoff_ms: int = 2000,
+    max_rpm: int = 120,
+    resume: Optional[dict] = None,
 ) -> SiteMap:
     """Breadth-first walk of the same-origin route graph from ``entry_url``.
 
@@ -110,14 +136,36 @@ async def crawl(
       starved, and a throttled page is indistinguishable from an empty one —
       so the honest move is fewer routes, not more untrustworthy ones.
     """
-    origin = origin_of(entry_url)
-    site = SiteMap(entry_url=entry_url, origin=origin, with_session=with_session)
-    first = True
+    started = time.monotonic()
+    baseline = controller.network_len()
 
-    start = normalize(entry_url)
-    queue: List[Tuple[str, int, str]] = [(start, 0, "entry")]
-    seen: Set[str] = {start}
-    skipped_seen: Set[str] = set()
+    if resume:
+        # Continue a crawl that stopped (limiter or cap) instead of re-walking
+        # what we already paid for -- the whole point when the target is the
+        # scarce resource.
+        site = SiteMap.resume_from(resume)
+        origin = site.origin
+        entry_url = site.entry_url
+        with_session = site.with_session
+        queue: List[Tuple[str, int, str]] = [
+            (f[0], int(f[1]), str(f[2])) for f in site.frontier
+        ]
+        seen: Set[str] = {normalize(r.url) for r in site.routes} | {q[0] for q in queue}
+        skipped_seen: Set[str] = {s_["url"] for s_ in site.skipped}
+        site.frontier = []
+        # A resumed run re-reports its own trust flags; a stale `rate_limited`
+        # from the previous leg would mislabel a clean continuation.
+        site.rate_limited = False
+        site.stopped_reason = None
+    else:
+        origin = origin_of(entry_url)
+        site = SiteMap(entry_url=entry_url, origin=origin, with_session=with_session)
+        start = normalize(entry_url)
+        queue = [(start, 0, "entry")]
+        seen = {start}
+        skipped_seen = set()
+    first = True
+    fetched = 0  # routes actually visited THIS leg (resumed ones were not)
 
     while queue:
         if len(site.routes) >= max_pages:
@@ -135,10 +183,13 @@ async def crawl(
             depth=depth,
             reached_by=[viaction],
         )
-        # Be a polite client: pause between routes so we don't trip the limiter
-        # in the first place. Skipped before the very first navigation.
-        if not first and delay_ms > 0:
-            await asyncio.sleep(delay_ms / 1000)
+        # Be a polite client. `pace` is the primary control (requests/minute,
+        # the unit limiters actually meter); delay_ms is a small floor so two
+        # cheap pages in a row still leave a gap.
+        if not first:
+            if delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000)
+            await pace(controller, started, max_rpm, baseline)
         first = False
 
         links: List[Any] = []
@@ -161,10 +212,19 @@ async def crawl(
                 node.error = str(exc)
 
             if not count_throttled(controller, net_mark):
+                if attempt > 0:
+                    site.rate_limit.recovered_after_retry = True
                 node.throttled = False
                 break
 
-            # Throttled. Back off exponentially and try this same route again.
+            # Throttled. Record when it first happened -- this is the crawl
+            # MEASURING the limiter rather than assuming it, so a later run can
+            # pick a real budget instead of a guess.
+            if site.rate_limit.first_throttle_after_requests is None:
+                site.rate_limit.first_throttle_after_requests = (
+                    controller.network_len() - baseline
+                )
+                site.rate_limit.first_throttle_after_s = time.monotonic() - started
             node.throttled = True
             if attempt < max_retries:
                 await asyncio.sleep((backoff_ms * (2**attempt)) / 1000)
@@ -178,6 +238,7 @@ async def crawl(
                 f"itself starved; re-run with a larger --delay-ms."
             )
             site.routes.append(node)
+            fetched += 1
             break
 
         # Rebase the same-origin baseline onto where the ENTRY actually LANDED.
@@ -195,6 +256,7 @@ async def crawl(
         # Appended exactly once, on both paths: appending inside the try AND in
         # the handler would list a route twice when a link raised mid-loop.
         site.routes.append(node)
+        fetched += 1
         if node.error or depth >= max_depth:
             continue
 
@@ -211,6 +273,21 @@ async def crawl(
                 seen.add(target)
                 queue.append((target, depth + 1, f"link:{link.text or link.href}"))
 
+    # Whatever is still queued travels with the result, so this map can be
+    # handed straight back via --resume.
+    site.frontier = [list(q) for q in queue]
+    site.rate_limit.requests_total = controller.network_len() - baseline
+    site.rate_limit.elapsed_s = time.monotonic() - started
+    if site.rate_limit.elapsed_s > 0:
+        site.rate_limit.effective_rpm = (
+            site.rate_limit.requests_total / site.rate_limit.elapsed_s * 60.0
+        )
+    if fetched:
+        # Divide by routes fetched on THIS leg, not the whole map. A resumed run
+        # carries routes it never re-requested; counting them understates the
+        # per-route cost -- the one number a caller uses to choose --max-rpm.
+        site.rate_limit.requests_per_route = site.rate_limit.requests_total / fetched
+    site.rate_limit.throttled_requests = count_throttled(controller, baseline)
     return site
 
 

@@ -39,11 +39,25 @@ PAGES = {
 }
 
 
+ENTRY_RETIRED = {"on": False}
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):  # noqa: N802 — stdlib callback name
         path = self.path.split("?")[0].rstrip("/") or "/"
+        if path == "/" and ENTRY_RETIRED["on"]:
+            # Used by the resume test: with the entry gone, a run that RESTARTS
+            # can reach nothing, while a genuine continuation works off its
+            # saved frontier and never needs the entry again.
+            body = b"<!doctype html><title>gone</title><h1>Gone</h1>"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/dashboard":  # gated: bounce to the login route
             self.send_response(302)
             self.send_header("Location", "/login")
@@ -298,3 +312,114 @@ def test_clean_site_is_not_flagged_as_rate_limited():
     assert site["throttled_routes"] == 0
     assert site["stopped_reason"] is None
     assert all(r["throttled"] is False for r in site["routes"])
+
+
+# -- continuation ------------------------------------------------------------
+
+
+def test_capped_run_carries_a_frontier_and_resumes_without_rewalking(tmp_path):
+    """A stopped crawl must be continuable, not restartable.
+
+    Restarting re-spends requests on routes already recorded — the most
+    expensive possible move against the very targets that stop you.
+
+    The discriminator matters: an earlier version of this test asserted only
+    "more routes, no duplicates", which a plain restart also satisfies, so it
+    passed with resume disabled. Here the entry page is RETIRED between the two
+    legs, so a restart can reach nothing at all (the entry 404s and yields no
+    links) while a genuine continuation works purely off its saved frontier.
+    """
+    first_path = tmp_path / "first.json"
+    with _server() as base:
+        first = _map(
+            base,
+            "--max-pages",
+            "2",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--output",
+            str(first_path),
+        )
+        assert first["capped"] is True
+        assert first["frontier"], "a capped run must carry its remaining queue"
+        already = {r["path"] for r in first["routes"]}
+        queued = {f[0] for f in first["frontier"]}
+
+        ENTRY_RETIRED["on"] = True
+        try:
+            second = _map(
+                base,
+                "--resume",
+                str(first_path),
+                "--delay-ms",
+                "0",
+                "--max-rpm",
+                "0",
+                "--max-pages",
+                "6",
+            )
+        finally:
+            ENTRY_RETIRED["on"] = False
+
+    paths = [r["path"] for r in second["routes"]]
+    assert len(paths) == len(set(paths)), f"resume re-walked a route: {paths}"
+    assert already <= set(paths), "resume dropped routes the first leg had found"
+    # Only a real continuation can reach a queued route now that / is gone.
+    reached = {r["url"] for r in second["routes"]}
+    assert reached & queued, (
+        "no frontier route was visited — the run restarted instead of resuming "
+        f"(reached={sorted(paths)})"
+    )
+    assert second["route_count"] > first["route_count"], "resume made no progress"
+    assert second["entry_url"] == first["entry_url"]
+    assert second["origin"] == first["origin"]
+
+
+def test_resume_clears_stale_trust_flags():
+    """A clean continuation must not inherit the previous leg's rate_limited
+    flag — that would permanently mark a map untrustworthy after one bad run."""
+    stale = {
+        "entry_url": "http://h/",
+        "origin": "http://h",
+        "with_session": False,
+        "routes": [{"path": "/", "url": "http://h/", "auth": "public"}],
+        "skipped": [],
+        "frontier": [],
+    }
+    from engine.catalog import SiteMap
+
+    site = SiteMap.resume_from(stale)
+    assert site.rate_limited is False
+    assert site.stopped_reason is None
+    assert len(site.routes) == 1 and site.routes[0].path == "/"
+
+
+# -- rate-limit mapping ------------------------------------------------------
+
+
+def test_rate_limit_profile_measures_the_run():
+    """The crawl reports what it OBSERVED about the limiter, so a later run can
+    pick a budget from evidence instead of a guess."""
+    with _server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0", "--max-pages", "3")
+    rl = site["rate_limit"]
+    assert rl["requests_total"] > 0
+    assert rl["requests_per_route"] > 0, "per-route request cost is the tuning number"
+    assert rl["effective_rpm"] > 0
+    assert rl["throttled_requests"] == 0
+    assert rl["first_throttle_after_requests"] is None
+
+
+def test_rate_limit_profile_records_where_throttling_began():
+    with _throttling_server() as base:
+        site = _map(base, "--max-retries", "1", "--delay-ms", "0", "--max-rpm", "0")
+    rl = site["rate_limit"]
+    assert site["rate_limited"] is True
+    assert rl["throttled_requests"] >= 1
+    assert rl["first_throttle_after_requests"] is not None, (
+        "the crawl must record WHERE the limiter bit, or a later run cannot "
+        "choose a budget from it"
+    )
+    assert rl["first_throttle_after_s"] is not None

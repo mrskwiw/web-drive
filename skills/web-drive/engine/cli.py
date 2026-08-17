@@ -99,6 +99,22 @@ def cli() -> None:
     help="Retries with exponential backoff when a route's requests return 429.",
 )
 @click.option(
+    "--max-rpm",
+    default=120,
+    help="Request-rate budget in requests/minute -- the unit limiters actually "
+    "meter. Paces on captured requests, so an asset-heavy page earns a longer "
+    "pause than a light one. 0 disables (not advised).",
+)
+@click.option(
+    "--resume",
+    "resume_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Continue a previous sitemap.json from its saved frontier instead of "
+    "re-walking routes already visited. Use after a run stopped on the limiter "
+    "or the page cap.",
+)
+@click.option(
     "--session",
     type=click.Path(exists=True),
     default=None,
@@ -124,11 +140,17 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     max_depth: int,
     delay_ms: int,
     max_retries: int,
+    max_rpm: int,
+    resume_path: str | None,
     session: str | None,
     user_agent: str | None,
     output: str | None,
 ) -> None:
     """Crawl the same-origin route graph and emit it as JSON.
+
+    Continuable: the emitted sitemap carries its remaining `frontier`, so a run
+    stopped by a limiter or a cap can be handed back via --resume rather than
+    restarted -- which matters most when the target is the scarce resource.
 
     Records, per route, where it actually landed (not where a link claimed it
     would go), the document status, and whether access appeared to require
@@ -139,6 +161,12 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     with exponential backoff, and STOPS rather than emitting rows for pages it
     starved -- reporting `rate_limited` and `stopped_reason` in the output.
     """
+
+    resume = (
+        json.loads(Path(resume_path).read_text(encoding="utf-8"))
+        if resume_path
+        else None
+    )
 
     async def run():
         controller = _controller(engine, headless, session, user_agent)
@@ -151,6 +179,8 @@ def map(  # noqa: A001 — the subcommand really is called `map`
                 max_depth=max_depth,
                 delay_ms=delay_ms,
                 max_retries=max_retries,
+                max_rpm=max_rpm,
+                resume=resume,
                 with_session=session is not None,
             )
         finally:

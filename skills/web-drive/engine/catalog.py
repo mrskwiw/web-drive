@@ -64,6 +64,59 @@ class RouteNode:
             "throttled": self.throttled,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RouteNode":
+        """Rebuild a route recorded by an earlier run (see SiteMap.resume_from)."""
+        return cls(
+            path=data["path"],
+            url=data["url"],
+            final_url=data.get("final_url", data["url"]),
+            status=data.get("status", 0),
+            title=data.get("title", ""),
+            depth=data.get("depth", 0),
+            auth=AuthState(data.get("auth", "unknown")),
+            redirected=data.get("redirected", False),
+            reached_by=list(data.get("reached_by", [])),
+            error=data.get("error"),
+            throttled=data.get("throttled", False),
+        )
+
+
+@dataclass
+class RateLimitProfile:
+    """What the crawl LEARNED about the target's limiter, not what we assumed.
+
+    Emitted on every run so a later crawl (or a human) can pick a sane budget
+    instead of guessing. The key number is requests, not pages: an asset-heavy
+    SPA pulls ~15 requests per page, so a per-page pause tells you almost
+    nothing about whether you are about to be throttled.
+    """
+
+    requests_total: int = 0
+    elapsed_s: float = 0.0
+    effective_rpm: float = 0.0
+    throttled_requests: int = 0
+    requests_per_route: float = 0.0
+    first_throttle_after_requests: Optional[int] = None
+    first_throttle_after_s: Optional[float] = None
+    recovered_after_retry: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "requests_total": self.requests_total,
+            "elapsed_s": round(self.elapsed_s, 1),
+            "effective_rpm": round(self.effective_rpm, 1),
+            "requests_per_route": round(self.requests_per_route, 1),
+            "throttled_requests": self.throttled_requests,
+            "first_throttle_after_requests": self.first_throttle_after_requests,
+            "first_throttle_after_s": (
+                round(self.first_throttle_after_s, 1)
+                if self.first_throttle_after_s is not None
+                else None
+            ),
+            "recovered_after_retry": self.recovered_after_retry,
+        }
+
 
 @dataclass
 class SiteMap:
@@ -81,6 +134,12 @@ class SiteMap:
     rate_limited: bool = False
     throttled_routes: int = 0
     stopped_reason: Optional[str] = None
+    rate_limit: RateLimitProfile = field(default_factory=RateLimitProfile)
+    # Routes still queued when the crawl stopped. Carrying the frontier makes the
+    # sitemap its own resume token: a run halted by a limiter or a cap can be
+    # continued instead of restarted, which matters most precisely when the
+    # target is rate-limited and re-walking what you already have is expensive.
+    frontier: List[List[Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -94,6 +153,26 @@ class SiteMap:
             "rate_limited": self.rate_limited,
             "throttled_routes": self.throttled_routes,
             "stopped_reason": self.stopped_reason,
+            "rate_limit": self.rate_limit.to_dict(),
+            "frontier": [list(f) for f in self.frontier],
             "routes": [r.to_dict() for r in self.routes],
             "skipped": list(self.skipped),
         }
+
+    @classmethod
+    def resume_from(cls, data: Dict[str, Any]) -> "SiteMap":
+        """Rebuild a partial crawl so it can be continued.
+
+        Only the fields a continuation needs are restored; counters that describe
+        *this* run (timings, effective rpm) start fresh, because averaging them
+        across a gap of unknown length would produce a meaningless rate.
+        """
+        site = cls(
+            entry_url=data["entry_url"],
+            origin=data["origin"],
+            with_session=data.get("with_session", False),
+        )
+        site.routes = [RouteNode.from_dict(r) for r in data.get("routes", [])]
+        site.skipped = list(data.get("skipped", []))
+        site.frontier = [list(f) for f in data.get("frontier", [])]
+        return site
