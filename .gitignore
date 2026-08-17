@@ -134,3 +134,7 @@ qa-results/
 
 # Ruff cache
 .ruff_cache/
+
+# QA/driver run scratch — holds live auth sessions, never publish
+.qa/
+*.session.json
