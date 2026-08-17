@@ -118,6 +118,18 @@ async def crawl(
         except Exception as exc:  # noqa: BLE001 — one bad route must not sink the crawl
             node.error = str(exc)
 
+        # Rebase the same-origin baseline onto where the ENTRY actually LANDED.
+        # A bare-domain -> www redirect (quizsquirrel.com -> www.quizsquirrel.com)
+        # or http -> https is extremely common; keeping the *requested* origin
+        # would make every link on the landed page read as off-origin, and the
+        # crawl would silently return a one-route graph for a whole site.
+        if depth == 0 and not node.error:
+            landed = origin_of(node.final_url)
+            if landed != origin:
+                origin = landed
+                site.origin = landed
+                seen.add(normalize(node.final_url))
+
         # Appended exactly once, on both paths: appending inside the try AND in
         # the handler would list a route twice when a link raised mid-loop.
         site.routes.append(node)

@@ -174,3 +174,52 @@ def test_depth_limit_and_cap_are_disclosed():
             "a truncated crawl must announce it -- a driver generated from a "
             "silently-truncated graph looks complete while missing half the site"
         )
+
+
+# -- entry redirect to a different origin ------------------------------------
+
+
+@contextmanager
+def _redirector(target: str):
+    """A server whose root 302s to another origin — the bare-domain -> www case."""
+
+    class _R(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):  # noqa: N802
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    srv = _Server(("127.0.0.1", 0), _R)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_origin_rebases_onto_where_the_entry_landed():
+    """quizsquirrel.com 301s to www.quizsquirrel.com. If the crawl keeps the
+    REQUESTED origin as its same-origin baseline, every link on the landed page
+    is off-origin and a whole site returns a one-route graph that looks complete.
+    Found on a live run, 2026-08-16."""
+    with _server() as real:
+        with _redirector(real + "/") as entry:
+            site = _map(entry)
+
+    assert site["origin"] == real, "origin must follow the entry redirect"
+    paths = {r["path"] for r in site["routes"]}
+    assert {"/about", "/deep"} <= paths, (
+        "links on the landed page were treated as off-origin — the crawl "
+        f"stopped at {len(site['routes'])} route(s): {sorted(paths)}"
+    )
+    assert not any(
+        s["reason"] == "off-origin" and real in s["url"] for s in site["skipped"]
+    )
