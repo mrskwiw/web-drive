@@ -44,6 +44,10 @@ class RouteNode:
     redirected: bool = False
     reached_by: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    # True when any request this route triggered came back 429. The row is then
+    # SUSPECT: a throttled page renders empty, which is indistinguishable from a
+    # genuinely empty one, so consumers must not treat it as observed truth.
+    throttled: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -57,6 +61,7 @@ class RouteNode:
             "redirected": self.redirected,
             "reached_by": list(self.reached_by),
             "error": self.error,
+            "throttled": self.throttled,
         }
 
 
@@ -70,6 +75,12 @@ class SiteMap:
     routes: List[RouteNode] = field(default_factory=list)
     skipped: List[Dict[str, Any]] = field(default_factory=list)
     capped: bool = False
+    # Set when the target rate-limited us. Like `capped`, this is a statement
+    # about the TRUSTWORTHINESS of the data, not a log line — a consumer that
+    # ignores it can build a driver from routes the crawler itself starved.
+    rate_limited: bool = False
+    throttled_routes: int = 0
+    stopped_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -80,6 +91,9 @@ class SiteMap:
             # `capped` must travel with the data: a truncated crawl that looks
             # complete is how a generated driver silently omits half a site.
             "capped": self.capped,
+            "rate_limited": self.rate_limited,
+            "throttled_routes": self.throttled_routes,
+            "stopped_reason": self.stopped_reason,
             "routes": [r.to_dict() for r in self.routes],
             "skipped": list(self.skipped),
         }

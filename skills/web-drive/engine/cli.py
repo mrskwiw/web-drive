@@ -87,6 +87,18 @@ def cli() -> None:
 )
 @click.option("--max-depth", default=3, help="Link depth from the entry URL.")
 @click.option(
+    "--delay-ms",
+    default=750,
+    help="Pause between routes. On by default -- crawling at full speed trips "
+    "real apps' rate limiters, and a throttled page is indistinguishable from "
+    "an empty one. Raise it for a strict target; 0 disables (not advised).",
+)
+@click.option(
+    "--max-retries",
+    default=3,
+    help="Retries with exponential backoff when a route's requests return 429.",
+)
+@click.option(
     "--session",
     type=click.Path(exists=True),
     default=None,
@@ -110,6 +122,8 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     headless: bool,
     max_pages: int,
     max_depth: int,
+    delay_ms: int,
+    max_retries: int,
     session: str | None,
     user_agent: str | None,
     output: str | None,
@@ -120,6 +134,10 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     would go), the document status, and whether access appeared to require
     authentication. Off-origin and non-http links are reported under `skipped`
     rather than silently dropped.
+
+    Polite by default: it pauses --delay-ms between routes, retries a 429'd route
+    with exponential backoff, and STOPS rather than emitting rows for pages it
+    starved -- reporting `rate_limited` and `stopped_reason` in the output.
     """
 
     async def run():
@@ -131,6 +149,8 @@ def map(  # noqa: A001 — the subcommand really is called `map`
                 url,
                 max_pages=max_pages,
                 max_depth=max_depth,
+                delay_ms=delay_ms,
+                max_retries=max_retries,
                 with_session=session is not None,
             )
         finally:

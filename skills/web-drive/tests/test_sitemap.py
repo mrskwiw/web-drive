@@ -223,3 +223,78 @@ def test_origin_rebases_onto_where_the_entry_landed():
     assert not any(
         s["reason"] == "off-origin" and real in s["url"] for s in site["skipped"]
     )
+
+
+# -- rate-limit anticipation -------------------------------------------------
+
+
+THROTTLE_PAGE = (
+    b"<!doctype html><title>Throttled</title><h1>Throttled</h1>"
+    b"<a href='/a'>A</a><a href='/b'>B</a>"
+    b"<script>fetch('/api/data');</script>"
+)
+
+
+class _ThrottleHandler(http.server.BaseHTTPRequestHandler):
+    """Documents always 200; the SPA's data endpoint always 429.
+
+    This is the shape that defeated the first implementation: checking the
+    document status alone reports a perfectly healthy crawl of starved pages.
+    """
+
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        if self.path.startswith("/api/"):
+            body, status = b"rate limited", 429
+        else:
+            body, status = THROTTLE_PAGE, 200
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@contextmanager
+def _throttling_server():
+    srv = _Server(("127.0.0.1", 0), _ThrottleHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_crawl_detects_429_on_subresources_and_stops():
+    """A 429'd data fetch behind a 200 document must stop the crawl and be
+    disclosed -- not silently produce rows for pages the crawler starved."""
+    with _throttling_server() as base:
+        site = _map(base, "--max-retries", "1", "--delay-ms", "0")
+
+    assert site["rate_limited"] is True, (
+        "429s on sub-resources went undetected -- the document status was 200, "
+        "which is exactly the case a document-only check misses"
+    )
+    assert site["throttled_routes"] >= 1
+    assert site["stopped_reason"] and "rate limited" in site["stopped_reason"]
+    assert site["routes"][-1]["throttled"] is True
+    # It must STOP, not carry on collecting starved rows.
+    assert (
+        site["route_count"] <= 2
+    ), f"kept crawling while throttled: {site['route_count']}"
+
+
+def test_clean_site_is_not_flagged_as_rate_limited():
+    """No false positives: the ordinary fixture must come back clean."""
+    with _server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-pages", "3")
+    assert site["rate_limited"] is False
+    assert site["throttled_routes"] == 0
+    assert site["stopped_reason"] is None
+    assert all(r["throttled"] is False for r in site["routes"])

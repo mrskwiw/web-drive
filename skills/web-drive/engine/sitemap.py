@@ -18,6 +18,7 @@ Design notes worth keeping:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, List, Optional, Set, Tuple
 from urllib.parse import urldefrag, urljoin, urlparse
 
@@ -73,16 +74,45 @@ def classify_auth(
     return AuthState.PUBLIC if 200 <= status < 400 else AuthState.UNKNOWN
 
 
+def count_throttled(controller: BrowserController, since: int) -> int:
+    """How many requests since ``since`` came back 429.
+
+    Counts **every** captured request, not just the document. This is the whole
+    trick: on the run that exposed this, the page documents kept returning 200
+    while the SPA's data fetches were throttled — so a document-status check
+    would have reported a perfectly healthy crawl of starved pages.
+    """
+    return sum(
+        1 for c in controller._network[since:] if c.status == 429
+    )  # noqa: SLF001
+
+
 async def crawl(
     controller: BrowserController,
     entry_url: str,
     max_pages: int = 40,
     max_depth: int = 3,
     with_session: bool = False,
+    delay_ms: int = 750,
+    max_retries: int = 3,
+    backoff_ms: int = 2000,
 ) -> SiteMap:
-    """Breadth-first walk of the same-origin route graph from ``entry_url``."""
+    """Breadth-first walk of the same-origin route graph from ``entry_url``.
+
+    Rate-limit behaviour (added after a live run exhausted a real app's quota):
+
+    * ``delay_ms`` is paused between routes — **on by default**. A crawler that
+      runs as fast as the browser allows will trip any real app's limiter.
+    * If a route's requests include a 429 it is **retried** after an exponential
+      backoff, because the first throttled response is usually recoverable.
+    * If it is still throttled after ``max_retries``, the crawl **stops** and
+      says so. Continuing would append rows for pages the crawler itself
+      starved, and a throttled page is indistinguishable from an empty one —
+      so the honest move is fewer routes, not more untrustworthy ones.
+    """
     origin = origin_of(entry_url)
     site = SiteMap(entry_url=entry_url, origin=origin, with_session=with_session)
+    first = True
 
     start = normalize(entry_url)
     queue: List[Tuple[str, int, str]] = [(start, 0, "entry")]
@@ -105,18 +135,50 @@ async def crawl(
             depth=depth,
             reached_by=[viaction],
         )
+        # Be a polite client: pause between routes so we don't trip the limiter
+        # in the first place. Skipped before the very first navigation.
+        if not first and delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000)
+        first = False
+
         links: List[Any] = []
-        try:
-            await controller.navigate(url)
-            snapshot = await controller.capture_snapshot()
-            node.final_url = snapshot.url
-            node.title = snapshot.title
-            node.redirected = normalize(snapshot.url) != normalize(url)
-            node.status = _status_for(controller, snapshot.url)
-            node.auth = classify_auth(url, snapshot.url, node.status, with_session)
-            links = list(snapshot.links)
-        except Exception as exc:  # noqa: BLE001 — one bad route must not sink the crawl
-            node.error = str(exc)
+        for attempt in range(max_retries + 1):
+            links = []
+            net_mark = controller.network_len()
+            try:
+                await controller.navigate(url)
+                snapshot = await controller.capture_snapshot()
+                node.final_url = snapshot.url
+                node.title = snapshot.title
+                node.redirected = normalize(snapshot.url) != normalize(url)
+                node.status = _status_for(controller, snapshot.url)
+                node.auth = classify_auth(url, snapshot.url, node.status, with_session)
+                links = list(snapshot.links)
+                node.error = None
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 — one bad route must not sink the crawl
+                node.error = str(exc)
+
+            if not count_throttled(controller, net_mark):
+                node.throttled = False
+                break
+
+            # Throttled. Back off exponentially and try this same route again.
+            node.throttled = True
+            if attempt < max_retries:
+                await asyncio.sleep((backoff_ms * (2**attempt)) / 1000)
+
+        if node.throttled:
+            site.rate_limited = True
+            site.throttled_routes += 1
+            site.stopped_reason = (
+                f"rate limited at {node.url} — still 429 after {max_retries} "
+                f"backoff retries. Stopped rather than recording routes the crawl "
+                f"itself starved; re-run with a larger --delay-ms."
+            )
+            site.routes.append(node)
+            break
 
         # Rebase the same-origin baseline onto where the ENTRY actually LANDED.
         # A bare-domain -> www redirect (quizsquirrel.com -> www.quizsquirrel.com)
