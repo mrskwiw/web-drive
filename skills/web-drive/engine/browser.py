@@ -111,7 +111,15 @@ _FOCUS_JS = (
 _CONTENT_JS = r"""
 () => {
   const t = (document.body && document.body.innerText) ? document.body.innerText : '';
-  return t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000);
+  const clean = t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  const LIMIT = 20000;
+  if (clean.length <= LIMIT) return clean;
+  // Truncation must ANNOUNCE itself. Silently returning a prefix makes a partial
+  // read indistinguishable from a whole page, so an agent judging "is this output
+  // complete?" reaches a confident verdict on evidence whose end it cannot see.
+  // Reporting the true length also tells it how much it is missing.
+  return clean.slice(0, LIMIT) +
+    '\n\n[content truncated: showing ' + LIMIT + ' of ' + clean.length + ' chars]';
 }
 """
 
@@ -377,21 +385,6 @@ class BrowserController:
             # Playwright accepts either a state dict or a path to a state file.
             ctx_kwargs["storage_state"] = self._storage_state
         self._context = await self._browser.new_context(**ctx_kwargs)
-        if self._block_assets:
-            # Mapping only needs routes, titles and links. Images, fonts, media
-            # and stylesheets change none of those, but on an asset-heavy SPA they
-            # are the bulk of the per-page request count -- and requests are the
-            # unit a rate limiter meters. Scripts are NEVER blocked: the app is a
-            # client-rendered SPA and would render nothing without them.
-            await self._context.route(
-                "**/*",
-                lambda route: (
-                    route.abort()
-                    if route.request.resource_type
-                    in ("image", "font", "media", "stylesheet")
-                    else route.continue_()
-                ),
-            )
         self._page = await self.context.new_page()
         self.page.set_default_timeout(self._timeout)
         self._wire_listeners()
