@@ -48,6 +48,11 @@ class RouteNode:
     # SUSPECT: a throttled page renders empty, which is indistinguishable from a
     # genuinely empty one, so consumers must not treat it as observed truth.
     throttled: bool = False
+    # What you can DO here. The snapshot is already taken to find links, so
+    # keeping its controls costs no extra request and turns a route list into a
+    # map you can actually walk: every route with its addressable controls.
+    controls: List[Dict[str, Any]] = field(default_factory=list)
+    forms: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,6 +67,8 @@ class RouteNode:
             "reached_by": list(self.reached_by),
             "error": self.error,
             "throttled": self.throttled,
+            "controls": list(self.controls),
+            "forms": list(self.forms),
         }
 
     @classmethod
@@ -79,6 +86,8 @@ class RouteNode:
             reached_by=list(data.get("reached_by", [])),
             error=data.get("error"),
             throttled=data.get("throttled", False),
+            controls=list(data.get("controls", [])),
+            forms=list(data.get("forms", [])),
         )
 
 

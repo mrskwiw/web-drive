@@ -541,3 +541,80 @@ def test_asset_blocking_removes_asset_requests_but_keeps_routes():
         blocked["rate_limit"]["requests_total"]
         <= allowed["rate_limit"]["requests_total"]
     )
+
+
+# -- button-driven route discovery -------------------------------------------
+
+
+BUTTON_INDEX = (
+    b"<!doctype html><title>Gate</title><h1>Gate</h1>"
+    b"<button onclick=\"location.href='/inner'\">Enter Dashboard</button>"
+    b"<button onclick=\"location.href='/wiped'\">Delete everything</button>"
+)
+
+
+class _ButtonHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        if self.path.startswith("/inner"):
+            body = b"<!doctype html><title>Inner</title><h1>Inner</h1><a href='/deep2'>Deep</a>"
+        elif self.path.startswith("/deep2"):
+            body = b"<!doctype html><title>Deep2</title><h1>Deep2</h1>"
+        elif self.path.startswith("/wiped"):
+            body = b"<!doctype html><title>Wiped</title><h1>Wiped</h1>"
+        else:
+            body = BUTTON_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _button_server():
+    srv = _Server(("127.0.0.1", 0), _ButtonHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_button_probing_finds_routes_no_link_exposes_and_skips_mutating_labels():
+    """An interstitial whose only control is a button is invisible to a link
+    crawler -- which is exactly how a real app mapped to a single route. Probing
+    must find it, and must NOT fire a control whose label says it changes state:
+    a map should describe the site, not what the crawl broke.
+    """
+    with _button_server() as base:
+        without = _map(base, "--delay-ms", "0", "--max-rpm", "0")
+        with_probe = _map(base, "--probe-buttons", "--delay-ms", "0", "--max-rpm", "0")
+
+    assert without["route_count"] == 1, "link-only crawl should see just the gate page"
+
+    paths = {r["path"] for r in with_probe["routes"]}
+    assert "/inner" in paths, f"button-reachable route not discovered: {sorted(paths)}"
+    # and its onward <a href> links are then followed normally
+    assert "/deep2" in paths, "discovery did not feed the normal link frontier"
+    assert "/wiped" not in paths, (
+        "clicked a control labelled 'Delete everything' -- probing must skip "
+        "state-changing labels even on a target we own"
+    )
+
+
+def test_routes_carry_their_controls_and_forms():
+    """A route list is not a walkable map; a route plus its addressable controls
+    is. This costs no extra request -- the snapshot is already taken to find
+    links."""
+    with _server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0", "--max-pages", "2")
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    assert root["controls"], "no controls captured for the entry route"
+    assert all({"role", "text", "selector"} <= set(c) for c in root["controls"])

@@ -26,6 +26,7 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 from .browser import BrowserController
 from .catalog import AuthState, RouteNode, SiteMap
+from .models import Action, ActionType
 
 # Path SEGMENTS that indicate a bounce to authentication. Matched per-segment,
 # never as a substring: "/auth" as a substring also matches "/blog/auth-in-rails",
@@ -142,6 +143,86 @@ async def pace(
         await asyncio.sleep(earned - elapsed)
 
 
+# Labels that suggest a control mutates state rather than navigates. Probing is
+# about DISCOVERING ROUTES, so these are skipped by default even on a target you
+# own: firing them would make the map's contents depend on what the crawl broke.
+_MUTATING_WORDS = (
+    "delete",
+    "remove",
+    "archive",
+    "buy",
+    "pay",
+    "purchase",
+    "upgrade",
+    "cancel",
+    "logout",
+    "sign out",
+    "submit",
+    "save",
+    "publish",
+    "send",
+    "generate",
+    "run",
+    "reset",
+    "disconnect",
+    "revoke",
+    "clear",
+)
+
+
+def is_probe_safe(text: str) -> bool:
+    """Whether a button looks like navigation rather than a state change."""
+    t = (text or "").strip().lower()
+    return bool(t) and not any(w in t for w in _MUTATING_WORDS)
+
+
+async def probe_buttons(
+    controller: BrowserController,
+    url: str,
+    controls: List[Any],
+    origin: str,
+    probed_labels: Set[str],
+    max_probes: int = 8,
+) -> List[Tuple[str, str]]:
+    """Click navigation-looking buttons to find routes no <a href> exposes.
+
+    SPAs route through onClick handlers constantly -- an interstitial whose only
+    control is an "Enter Dashboard" button is invisible to a link crawler, which
+    is exactly how this app first mapped to a single route. Each candidate is
+    clicked from a freshly re-navigated page so one button's side effects cannot
+    contaminate the next one's result.
+    """
+    found: List[Tuple[str, str]] = []
+    budget = max_probes
+    for ctl in controls:
+        if budget <= 0:
+            break
+        label = (ctl.get("text") or "").strip().lower()
+        if ctl.get("role") != "button" or not is_probe_safe(label):
+            continue
+        # Dedup by LABEL across the whole crawl. A dashboard nav renders on every
+        # route, so probing "Projects" once per page turns an O(routes) crawl into
+        # O(routes x buttons) -- which is what made the first live attempt exceed
+        # ten minutes without finishing. One click per distinct label suffices.
+        if label in probed_labels:
+            continue
+        probed_labels.add(label)
+        budget -= 1
+        try:
+            await controller.navigate(url)
+            before = controller.page.url
+            await controller.perform(
+                Action(type=ActionType.CLICK, selector=ctl["selector"])
+            )
+            await controller.settle(900)
+            after = controller.page.url
+            if normalize(after) != normalize(before) and same_origin(after, origin):
+                found.append((normalize(after), f"button:{ctl.get('text','')[:40]}"))
+        except Exception:  # noqa: BLE001 — a button that will not click is not a route
+            continue
+    return found
+
+
 async def crawl(
     controller: BrowserController,
     entry_url: str,
@@ -153,6 +234,7 @@ async def crawl(
     backoff_ms: int = 2000,
     max_rpm: int = 120,
     max_per_template: int = 3,
+    probe_buttons_enabled: bool = False,
     resume: Optional[dict] = None,
 ) -> SiteMap:
     """Breadth-first walk of the same-origin route graph from ``entry_url``.
@@ -200,6 +282,7 @@ async def crawl(
         skipped_seen = set()
         template_seen = {}
         collapsed = {}
+    probed_labels: Set[str] = set()
     first = True
     fetched = 0  # routes actually visited THIS leg (resumed ones were not)
 
@@ -241,6 +324,32 @@ async def crawl(
                 node.status = _status_for(controller, snapshot.url)
                 node.auth = classify_auth(url, snapshot.url, node.status, with_session)
                 links = list(snapshot.links)
+                node.controls = [
+                    {
+                        "role": e.role,
+                        "text": e.text,
+                        "selector": e.selector,
+                        "rank": e.rank,
+                        "kind": getattr(e, "kind", None),
+                    }
+                    for e in snapshot.interactive
+                ]
+                node.forms = [
+                    {
+                        "submit": f.submit,
+                        "destructive": f.destructive,
+                        "fields": [
+                            {
+                                "selector": x.selector,
+                                "type": x.type,
+                                "name": x.name,
+                                "label": x.label,
+                            }
+                            for x in f.fields
+                        ],
+                    }
+                    for f in snapshot.forms
+                ]
                 node.error = None
             except (
                 Exception
@@ -295,6 +404,19 @@ async def crawl(
         fetched += 1
         if node.error or depth >= max_depth:
             continue
+
+        discovered: List[Tuple[str, str]] = []
+        if probe_buttons_enabled and node.controls:
+            for tgt, via in await probe_buttons(
+                controller, node.final_url, node.controls, origin, probed_labels
+            ):
+                if tgt not in seen:
+                    discovered.append((tgt, via))
+
+        for tgt, via in discovered:
+            if tgt not in seen:
+                seen.add(tgt)
+                queue.append((tgt, depth + 1, via))
 
         for link in links:
             target, reason = _resolve(link, node.final_url, origin)

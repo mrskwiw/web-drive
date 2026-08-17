@@ -121,6 +121,14 @@ def cli() -> None:
     "before counting the rest as collapsed.",
 )
 @click.option(
+    "--probe-buttons/--no-probe-buttons",
+    default=False,
+    help="Also click navigation-looking buttons to discover routes no <a href> "
+    "exposes -- SPAs route through onClick constantly. Controls whose label "
+    "suggests a state change (delete/save/publish/buy/...) are skipped even so: "
+    "the map should describe the site, not what the crawl changed.",
+)
+@click.option(
     "--resume",
     "resume_path",
     type=click.Path(exists=True),
@@ -158,6 +166,7 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     max_rpm: int,
     block_assets: bool,
     max_per_template: int,
+    probe_buttons: bool,
     resume_path: str | None,
     session: str | None,
     user_agent: str | None,
@@ -198,6 +207,7 @@ def map(  # noqa: A001 — the subcommand really is called `map`
                 max_retries=max_retries,
                 max_rpm=max_rpm,
                 max_per_template=max_per_template,
+                probe_buttons_enabled=probe_buttons,
                 resume=resume,
                 with_session=session is not None,
             )
