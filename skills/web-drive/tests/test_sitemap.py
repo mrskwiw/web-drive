@@ -178,11 +178,11 @@ def test_crawl_walks_the_graph_and_records_what_it_observed():
 
 def test_depth_limit_and_cap_are_disclosed():
     with _server() as base:
-        shallow = _map(base, "--max-depth", "1")
+        shallow = _map(base, "--single-pass", "--max-depth", "1")
         assert "/deeper" not in {r["path"] for r in shallow["routes"]}
         assert shallow["capped"] is False  # bounded by depth, not by the cap
 
-        capped = _map(base, "--max-pages", "2")
+        capped = _map(base, "--single-pass", "--max-pages", "2")
         assert capped["route_count"] == 2
         assert capped["capped"] is True, (
             "a truncated crawl must announce it -- a driver generated from a "
@@ -289,7 +289,7 @@ def test_crawl_detects_429_on_subresources_and_stops():
     """A 429'd data fetch behind a 200 document must stop the crawl and be
     disclosed -- not silently produce rows for pages the crawler starved."""
     with _throttling_server() as base:
-        site = _map(base, "--max-retries", "1", "--delay-ms", "0")
+        site = _map(base, "--single-pass", "--max-retries", "1", "--delay-ms", "0")
 
     assert site["rate_limited"] is True, (
         "429s on sub-resources went undetected -- the document status was 200, "
@@ -307,14 +307,20 @@ def test_crawl_detects_429_on_subresources_and_stops():
 def test_clean_site_is_not_flagged_as_rate_limited():
     """No false positives: the ordinary fixture must come back clean."""
     with _server() as base:
-        site = _map(base, "--delay-ms", "0", "--max-pages", "3")
+        site = _map(
+            base,
+            "--single-pass",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--max-pages",
+            "3",
+        )
     assert site["rate_limited"] is False
     assert site["throttled_routes"] == 0
     assert site["stopped_reason"] is None
     assert all(r["throttled"] is False for r in site["routes"])
-
-
-# -- continuation ------------------------------------------------------------
 
 
 def test_capped_run_carries_a_frontier_and_resumes_without_rewalking(tmp_path):
@@ -403,7 +409,16 @@ def test_rate_limit_profile_measures_the_run():
     """The crawl reports what it OBSERVED about the limiter, so a later run can
     pick a budget from evidence instead of a guess."""
     with _server() as base:
-        site = _map(base, "--delay-ms", "0", "--max-rpm", "0", "--max-pages", "3")
+        site = _map(
+            base,
+            "--single-pass",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--max-pages",
+            "3",
+        )
     rl = site["rate_limit"]
     assert rl["requests_total"] > 0
     assert rl["requests_per_route"] > 0, "per-route request cost is the tuning number"
@@ -414,7 +429,16 @@ def test_rate_limit_profile_measures_the_run():
 
 def test_rate_limit_profile_records_where_throttling_began():
     with _throttling_server() as base:
-        site = _map(base, "--max-retries", "1", "--delay-ms", "0", "--max-rpm", "0")
+        site = _map(
+            base,
+            "--single-pass",
+            "--max-retries",
+            "1",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+        )
     rl = site["rate_limit"]
     assert site["rate_limited"] is True
     assert rl["throttled_requests"] >= 1
@@ -523,7 +547,16 @@ def test_asset_blocking_removes_asset_requests_but_keeps_routes():
     """Blocking images/fonts/media cuts the request count -- the unit limiters
     meter -- without changing what the map records."""
     with _server() as base:
-        blocked = _map(base, "--delay-ms", "0", "--max-rpm", "0", "--max-pages", "3")
+        blocked = _map(
+            base,
+            "--single-pass",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--max-pages",
+            "3",
+        )
         allowed = _map(
             base,
             "--delay-ms",
@@ -614,7 +647,42 @@ def test_routes_carry_their_controls_and_forms():
     is. This costs no extra request -- the snapshot is already taken to find
     links."""
     with _server() as base:
-        site = _map(base, "--delay-ms", "0", "--max-rpm", "0", "--max-pages", "2")
+        site = _map(
+            base,
+            "--single-pass",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--max-pages",
+            "2",
+        )
     root = next(r for r in site["routes"] if r["path"] == "/")
     assert root["controls"], "no controls captured for the entry route"
     assert all({"role", "text", "selector"} <= set(c) for c in root["controls"])
+
+
+def test_auto_resume_exhausts_the_frontier_without_manual_legs():
+    """The default must finish the site on its own.
+
+    Finishing content-jumpstart took four hand-run --resume invocations; the
+    crawl already recorded its frontier each time, so the only thing the human
+    added was patience. A capped first leg must now be continued automatically
+    until nothing is queued.
+    """
+    with _server() as base:
+        one = _map(
+            base,
+            "--single-pass",
+            "--max-pages",
+            "2",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+        )
+        assert one["capped"] is True and one["frontier"], "setup: leg 1 must stop early"
+
+        auto = _map(base, "--max-pages", "50", "--delay-ms", "0", "--max-rpm", "0")
+    assert auto["frontier"] == [], f"auto-resume left {len(auto['frontier'])} queued"
+    assert auto["route_count"] > one["route_count"]

@@ -129,6 +129,25 @@ def cli() -> None:
     "the map should describe the site, not what the crawl changed.",
 )
 @click.option(
+    "--until-exhausted/--single-pass",
+    default=True,
+    help="Keep going until the frontier is empty: on a rate-limit stop, cool "
+    "down, LOWER the request budget, and resume from the saved frontier. "
+    "--single-pass does one leg and returns whatever it got.",
+)
+@click.option(
+    "--max-legs",
+    default=12,
+    help="Safety bound on auto-resume legs, so a site that never exhausts (or a "
+    "limiter that never relents) cannot loop forever.",
+)
+@click.option(
+    "--cooldown-s",
+    default=60,
+    help="Wait after a rate-limited leg before resuming. Doubles each time a "
+    "leg is throttled again, since the limiter's window is unknown.",
+)
+@click.option(
     "--resume",
     "resume_path",
     type=click.Path(exists=True),
@@ -167,6 +186,9 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     block_assets: bool,
     max_per_template: int,
     probe_buttons: bool,
+    until_exhausted: bool,
+    max_legs: int,
+    cooldown_s: int,
     resume_path: str | None,
     session: str | None,
     user_agent: str | None,
@@ -198,24 +220,87 @@ def map(  # noqa: A001 — the subcommand really is called `map`
         controller = _controller(engine, headless, session, user_agent, block_assets)
         await controller.launch()
         try:
-            return await crawl(
+            return await _crawl_until_done(
                 controller,
                 url,
                 max_pages=max_pages,
                 max_depth=max_depth,
+                with_session=session is not None,
                 delay_ms=delay_ms,
                 max_retries=max_retries,
                 max_rpm=max_rpm,
                 max_per_template=max_per_template,
                 probe_buttons_enabled=probe_buttons,
                 resume=resume,
-                with_session=session is not None,
+                until_exhausted=until_exhausted,
+                max_legs=max_legs,
+                cooldown_s=cooldown_s,
             )
         finally:
             await controller.close()
 
     site = asyncio.run(run())
     _emit(site.to_dict(), output)
+
+
+def _apply_totals(site, totals) -> None:
+    rl = site.rate_limit
+    rl.requests_total = totals["requests"]
+    rl.elapsed_s = totals["elapsed"]
+    rl.throttled_requests = totals["throttled"]
+    rl.effective_rpm = (
+        totals["requests"] / totals["elapsed"] * 60.0 if totals["elapsed"] else 0.0
+    )
+    if site.routes:
+        rl.requests_per_route = totals["requests"] / len(site.routes)
+
+
+async def _crawl_until_done(
+    controller, url, *, until_exhausted, max_legs, cooldown_s, **kw
+):
+    """Run legs until the frontier empties, adapting to the limiter as it goes.
+
+    A rate-limited stop is not a failure, it is information: the crawl already
+    knows how to record its frontier, so the only thing a human was adding by
+    re-running `--resume` was patience. Each throttled leg cools down longer and
+    lowers the request budget, so the crawl converges on a rate the target will
+    actually tolerate instead of guessing one up front.
+    """
+    state = kw.pop("resume", None)
+    rpm = kw.pop("max_rpm")
+    cooldown = cooldown_s
+    site = None
+    totals = {"requests": 0, "elapsed": 0.0, "throttled": 0, "legs": 0}
+    for leg in range(1, max_legs + 1):
+        site = await crawl(controller, url, max_rpm=rpm, resume=state, **kw)
+        # The profile must describe the whole RUN. Reporting only the final leg
+        # made a run whose last leg found nothing report zero requests -- a
+        # tuning number that is not merely wrong but inverted.
+        totals["requests"] += site.rate_limit.requests_total
+        totals["elapsed"] += site.rate_limit.elapsed_s
+        totals["throttled"] += site.rate_limit.throttled_requests
+        totals["legs"] = leg
+        _apply_totals(site, totals)
+        if not until_exhausted or not site.frontier:
+            break
+        if site.rate_limited:
+            # Back off on BOTH axes: wait longer, and ask for less next time.
+            await asyncio.sleep(cooldown)
+            cooldown = min(cooldown * 2, 600)
+            rpm = max(20, int(rpm * 0.6))
+        state = site.to_dict()
+    if site is not None:
+        _apply_totals(site, totals)
+    # Only an auto-resume run can 'give up'. On --single-pass a non-empty
+    # frontier is the expected outcome, and claiming otherwise would report a
+    # failure that never happened.
+    if until_exhausted and site is not None and site.frontier:
+        site.stopped_reason = (
+            (site.stopped_reason or "")
+            + f" | auto-resume stopped after {max_legs} legs with "
+            f"{len(site.frontier)} route(s) still queued -- re-run with --resume."
+        ).strip(" |")
+    return site
 
 
 def main() -> None:
