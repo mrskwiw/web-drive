@@ -61,6 +61,38 @@ pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
+## Authentication, including logins you cannot script
+
+Most apps are behind a login, and some of those logins **cannot be driven** —
+Google/SSO actively blocks automated browsers, and passkeys and MFA are designed
+to resist exactly this. Do not try to defeat that; it is an arms race a QA tool
+should not enter, and a tool that fakes its way past a security control is worse
+than one that admits the boundary.
+
+Instead, sign in **once, by hand**, and reuse the result:
+
+```bash
+# Opens a REAL browser. You complete OAuth/SSO/MFA yourself.
+python -m engine.cli login \n    --url https://app.example.com/login \n    --until-url /dashboard \n    --save-session .qa/session.json \n    --user-agent "Mozilla/5.0 ... QASession"
+
+# Every later run is headless and authenticated.
+python -m engine.cli map \n    --url https://app.example.com/dashboard \n    --session .qa/session.json \n    --user-agent "Mozilla/5.0 ... QASession"
+```
+
+What is saved is the **app's** session (cookies + localStorage), not the identity
+provider's. Once the redirect completes the provider is out of the picture, which
+is why one manual sign-in unlocks every later headless run until the token
+expires. Use `--until-selector` instead of `--until-url` when the app lands back
+on the same path.
+
+**Pin the same `--user-agent` for the login and every replay.** Tokens are
+commonly bound to a UA+IP fingerprint, so a bundle saved under one UA and
+replayed under another is rejected — and it fails looking like an expired
+session, which sends you hunting the wrong problem.
+
+The bundle format is shared with `web-qa`, so a session established by either
+skill is replayable by the other.
+
 ## Workflow
 
 ### 0. Map the route graph

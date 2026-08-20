@@ -303,6 +303,149 @@ async def _crawl_until_done(
     return site
 
 
+async def wait_for_manual_login(
+    controller: BrowserController,
+    until_url: str | None,
+    until_selector: str | None,
+    timeout_s: int,
+    poll_ms: int = 500,
+) -> bool:
+    """Poll until the human has finished authenticating, or the clock runs out.
+
+    Polling rather than a fixed sleep matters: an SSO round trip can take five
+    seconds or ninety depending on whether a 2FA prompt appears, and a fixed wait
+    either wastes the difference or saves a half-authenticated context.
+
+    With no condition given we simply wait out ``timeout_s`` and save whatever
+    state exists -- crude, but it is the honest fallback for a flow whose success
+    page we cannot predict.
+    """
+    waited = 0
+    while waited < timeout_s * 1000:
+        if until_url and until_url in controller.page.url:
+            return True
+        if until_selector:
+            try:
+                if await controller.is_present(until_selector):
+                    return True
+            except Exception:  # noqa: BLE001 — mid-navigation; try again next poll
+                pass
+        await asyncio.sleep(poll_ms / 1000)
+        waited += poll_ms
+    return not (until_url or until_selector)
+
+
+@cli.command()
+@click.option(
+    "--url", required=True, help="Where to start -- usually the app's login page."
+)
+@click.option(
+    "--save-session",
+    "save_path",
+    required=True,
+    type=click.Path(),
+    help="Where to write the session bundle, for later --session replay.",
+)
+@click.option(
+    "--until-url",
+    default=None,
+    help="Substring of the URL that means you're in (e.g. /dashboard). Polled.",
+)
+@click.option(
+    "--until-selector",
+    default=None,
+    help="Selector that appears once authenticated. Polled. Use instead of "
+    "--until-url when the app lands back on the same path.",
+)
+@click.option(
+    "--timeout-s", default=300, help="How long you get to finish. Default 5 min."
+)
+@click.option(
+    "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
+)
+@click.option(
+    "--headless/--no-headless",
+    default=False,
+    help="Headed by DEFAULT -- you cannot complete a login you cannot see.",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Pin the user-agent. Whatever is used here MUST be reused on every "
+    "--session replay: tokens are commonly bound to a UA+IP fingerprint, so a "
+    "bundle saved under one UA and replayed under another is rejected.",
+)
+def login(
+    url: str,
+    save_path: str,
+    until_url: str | None,
+    until_selector: str | None,
+    timeout_s: int,
+    engine: str,
+    headless: bool,
+    user_agent: str | None,
+) -> None:
+    """Open a real browser, let a HUMAN authenticate, then save the session.
+
+    This exists for the logins a script cannot drive: Google/SSO (which actively
+    blocks automated browsers), passkeys, MFA, magic links. Automating those is
+    an arms race a QA tool should not enter -- but nothing stops us from letting
+    you sign in once by hand and reusing the result.
+
+    What gets saved is the APP's session (cookies + localStorage), not anything
+    of the identity provider's. After the redirect completes the provider is out
+    of the picture, which is why one manual login unlocks every later headless
+    run until the token expires.
+
+        python -m engine.cli login --url https://app.example.com/login             --until-url /dashboard --save-session .qa/session.json
+        python -m engine.cli map --url https://app.example.com/dashboard             --session .qa/session.json
+    """
+
+    async def run():
+        controller = _controller(engine, headless, None, user_agent, False)
+        await controller.launch()
+        try:
+            await controller.navigate(url)
+            click.echo(f"Browser open at {url}", err=True)
+            click.echo(
+                "Sign in however you need to -- OAuth, SSO, MFA, magic link.",
+                err=True,
+            )
+            if until_url:
+                cond = f"until the URL contains {until_url!r}"
+            elif until_selector:
+                cond = f"until {until_selector!r} appears"
+            else:
+                cond = "the full window (no success condition given)"
+            click.echo(f"Waiting {cond}, up to {timeout_s}s.", err=True)
+            ok = await wait_for_manual_login(
+                controller, until_url, until_selector, timeout_s
+            )
+            saved = await controller.save_session(save_path, user_agent=user_agent)
+            state = await controller.context.storage_state()
+            return {
+                "saved": saved,
+                "detected_login": ok,
+                "final_url": controller.page.url,
+                "cookies": len(state.get("cookies", [])),
+                "user_agent": user_agent,
+            }
+        finally:
+            await controller.close()
+
+    result = asyncio.run(run())
+    if not result["detected_login"]:
+        # Saved anyway -- a bundle from a half-finished login is still worth
+        # inspecting -- but never reported as success.
+        click.echo(
+            "WARNING: the success condition was never met. The bundle was saved "
+            "but may not be authenticated; verify with a --session run before "
+            "trusting it.",
+            err=True,
+        )
+    _emit(result, None)
+
+
 def main() -> None:
     cli()
 
