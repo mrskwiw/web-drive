@@ -148,6 +148,13 @@ def cli() -> None:
     "leg is throttled again, since the limiter's window is unknown.",
 )
 @click.option(
+    "--fill-forms/--no-fill-forms",
+    default=False,
+    help="Fill and submit non-destructive forms to reach what is behind them "
+    "(search, filters, 'continue' gates). Forms marked destructive, and any "
+    "form containing a password field, are always skipped.",
+)
+@click.option(
     "--resume",
     "resume_path",
     type=click.Path(exists=True),
@@ -186,6 +193,7 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     block_assets: bool,
     max_per_template: int,
     probe_buttons: bool,
+    fill_forms: bool,
     until_exhausted: bool,
     max_legs: int,
     cooldown_s: int,
@@ -231,6 +239,7 @@ def map(  # noqa: A001 — the subcommand really is called `map`
                 max_rpm=max_rpm,
                 max_per_template=max_per_template,
                 probe_buttons_enabled=probe_buttons,
+                fill_forms_enabled=fill_forms,
                 resume=resume,
                 until_exhausted=until_exhausted,
                 max_legs=max_legs,

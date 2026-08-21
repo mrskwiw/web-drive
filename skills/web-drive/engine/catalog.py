@@ -153,6 +153,13 @@ class SiteMap:
     # crawled once the per-template sample was met -- disclosed, like `capped`,
     # because "we saw 20 of these and walked 3" is a different claim from
     # "there are 3 of these".
+    # How this site actually navigates. A crawl that follows only <a href> can
+    # exhaust its frontier on a site it barely touched, and then reports
+    # `frontier: 0` — complete-looking and wrong. Measuring link yield against
+    # the number of buttons lets the map say so instead of implying success.
+    navigation_hint: Optional[str] = None
+    buttons_seen: int = 0
+    link_discoveries: int = 0
     templates: List[Dict[str, Any]] = field(default_factory=list)
     collapsed_routes: int = 0
     _template_seen: Dict[str, int] = field(default_factory=dict)
@@ -172,6 +179,9 @@ class SiteMap:
             "stopped_reason": self.stopped_reason,
             "rate_limit": self.rate_limit.to_dict(),
             "frontier": [list(f) for f in self.frontier],
+            "navigation_hint": self.navigation_hint,
+            "buttons_seen": self.buttons_seen,
+            "link_discoveries": self.link_discoveries,
             "templates": list(self.templates),
             "collapsed_routes": self.collapsed_routes,
             "_template_seen": dict(self._template_seen),

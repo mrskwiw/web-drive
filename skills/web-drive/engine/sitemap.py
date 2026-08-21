@@ -223,6 +223,72 @@ async def probe_buttons(
     return found
 
 
+# Values safe to type into a discovery form. Nothing here should read as real
+# user data if it lands in someone's database.
+_FILL_VALUES = {
+    "email": "qa-probe@example.com",
+    "search": "test",
+    "number": "1",
+    "tel": "5555550100",
+    "url": "https://example.com",
+}
+
+
+async def probe_forms(
+    controller: BrowserController,
+    url: str,
+    forms: List[Any],
+    origin: str,
+    probed: Set[str],
+) -> List[Tuple[str, str]]:
+    """Fill and submit non-destructive forms to reach what lies behind them.
+
+    Search boxes, filters and "continue" gates hide whole sections from a link
+    crawler. Filling them is how you find those sections.
+
+    Three hard limits, because a discovery crawl must not become a write:
+    a form the snapshot marks ``destructive`` is skipped; any form containing a
+    password field is skipped (that is a login, and guessing at one is both
+    useless and hostile); and values are obviously synthetic so anything that
+    does persist is identifiable as a probe.
+    """
+    found: List[Tuple[str, str]] = []
+    for form in forms:
+        if form.get("destructive"):
+            continue
+        fields = form.get("fields") or []
+        if any((f.get("type") or "") == "password" for f in fields):
+            continue
+        sig = f"{form.get('submit')}|{len(fields)}"
+        if not form.get("submit") or sig in probed:
+            continue
+        probed.add(sig)
+        try:
+            await controller.navigate(url)
+            before = controller.page.url
+            for f in fields:
+                ftype = (f.get("type") or "text").lower()
+                if ftype in ("hidden", "submit", "button", "file", "checkbox", "radio"):
+                    continue
+                await controller.perform(
+                    Action(
+                        type=ActionType.FILL,
+                        selector=f["selector"],
+                        value=_FILL_VALUES.get(ftype, "test"),
+                    )
+                )
+            await controller.perform(
+                Action(type=ActionType.CLICK, selector=form["submit"])
+            )
+            await controller.settle(1200)
+            after = controller.page.url
+            if normalize(after) != normalize(before) and same_origin(after, origin):
+                found.append((normalize(after), f"form:{form.get('submit','')[:34]}"))
+        except Exception:  # noqa: BLE001 — a form that will not submit is not a route
+            continue
+    return found
+
+
 async def crawl(
     controller: BrowserController,
     entry_url: str,
@@ -235,6 +301,7 @@ async def crawl(
     max_rpm: int = 120,
     max_per_template: int = 3,
     probe_buttons_enabled: bool = False,
+    fill_forms_enabled: bool = False,
     resume: Optional[dict] = None,
 ) -> SiteMap:
     """Breadth-first walk of the same-origin route graph from ``entry_url``.
@@ -283,6 +350,7 @@ async def crawl(
         template_seen = {}
         collapsed = {}
     probed_labels: Set[str] = set()
+    probed_forms: Set[str] = set()
     first = True
     fetched = 0  # routes actually visited THIS leg (resumed ones were not)
 
@@ -413,6 +481,13 @@ async def crawl(
                 if tgt not in seen:
                     discovered.append((tgt, via))
 
+        if fill_forms_enabled and node.forms:
+            for tgt, via in await probe_forms(
+                controller, node.final_url, node.forms, origin, probed_forms
+            ):
+                if tgt not in seen:
+                    discovered.append((tgt, via))
+
         for tgt, via in discovered:
             if tgt not in seen:
                 seen.add(tgt)
@@ -439,6 +514,7 @@ async def crawl(
                 collapsed[tmpl] = collapsed.get(tmpl, 0) + 1
                 continue
             seen.add(target)
+            site.link_discoveries += 1
             queue.append((target, depth + 1, f"link:{link.text or link.href}"))
 
     # Whatever is still queued travels with the result, so this map can be
@@ -469,6 +545,32 @@ async def crawl(
         }
         for t in sorted(set(visited) | set(template_seen))
     ]
+    site.buttons_seen = sum(
+        1 for r in site.routes for c in r.controls if c.get("role") == "button"
+    )
+    # Say it plainly when the map is probably a fraction of the site. A crawl
+    # that exhausts its frontier after three routes on a page carrying dozens of
+    # buttons has not mapped the app; it has run out of the ONE mechanism it
+    # understands, and reporting `frontier: 0` without this reads as success.
+    # Two distinct shapes of "the link mechanism is exhausted, not the site".
+    #  * zero yield with buttons present -- a gate page whose only control is a
+    #    button (content-jumpstart's interstitial mapped to ONE route this way);
+    #  * heavy button surface with negligible link yield -- isekaizero returned 3
+    #    routes off 230 buttons, and reported frontier 0 as though complete.
+    # Thresholds are deliberately conservative: a site that genuinely navigates
+    # by link always clears them, and a warning that cries wolf gets ignored.
+    heavy = site.buttons_seen >= 20 and site.link_discoveries * 10 < site.buttons_seen
+    barren = site.buttons_seen >= 3 and site.link_discoveries == 0
+    if (heavy or barren) and not probe_buttons_enabled:
+        site.navigation_hint = (
+            f"LIKELY INCOMPLETE: {site.buttons_seen} button(s) across "
+            f"{len(site.routes)} route(s), but only {site.link_discoveries} "
+            f"route(s) came from <a href>. This site probably navigates by "
+            f"button/onClick, which link crawling cannot see -- so `frontier: 0` "
+            f"means the link mechanism is exhausted, NOT that the site is mapped. "
+            f"Re-run with --probe-buttons (add --fill-forms if sections sit "
+            f"behind search/filter gates)."
+        )
     site.collapsed_routes = sum(collapsed.values())
     site._template_seen = template_seen
     site._collapsed = collapsed

@@ -686,3 +686,169 @@ def test_auto_resume_exhausts_the_frontier_without_manual_legs():
         auto = _map(base, "--max-pages", "50", "--delay-ms", "0", "--max-rpm", "0")
     assert auto["frontier"] == [], f"auto-resume left {len(auto['frontier'])} queued"
     assert auto["route_count"] > one["route_count"]
+
+
+# -- form-based discovery + incompleteness disclosure -------------------------
+
+
+FORM_INDEX = (
+    b"<!doctype html><title>Home</title><h1>Home</h1>"
+    b"<form action='/results'><input name='q' type='search'>"
+    b"<button type='submit'>Search</button></form>"
+    b"<form action='/wiped'><input name='confirm' type='text'>"
+    b"<button type='submit'>Delete account</button></form>"
+    b"<form action='/loggedin'><input name='u' type='text'>"
+    b"<input name='p' type='password'><button type='submit'>Sign in</button></form>"
+)
+
+
+class _FormHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/results":
+            body = b"<!doctype html><title>Results</title><h1>Results</h1>"
+        elif path == "/wiped":
+            body = b"<!doctype html><title>Wiped</title><h1>Wiped</h1>"
+        elif path == "/loggedin":
+            body = b"<!doctype html><title>In</title><h1>In</h1>"
+        else:
+            body = FORM_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _form_server():
+    srv = _Server(("127.0.0.1", 0), _FormHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_form_filling_reaches_behind_a_search_but_never_submits_a_login_or_a_delete():
+    """Search and filter forms hide whole sections from a link crawler, so a
+    discovery crawl has to fill them. It must not become a WRITE while doing it:
+    a destructive form is skipped, and a form with a password field is skipped
+    because guessing at a login is both useless and hostile.
+    """
+    with _form_server() as base:
+        site = _map(
+            base,
+            "--fill-forms",
+            "--single-pass",
+            "--delay-ms",
+            "0",
+            "--max-rpm",
+            "0",
+            "--max-depth",
+            "2",
+        )
+    paths = {r["path"] for r in site["routes"]}
+    assert "/results" in paths, f"search form not followed: {sorted(paths)}"
+    assert "/wiped" not in paths, "submitted a form labelled 'Delete account'"
+    assert "/loggedin" not in paths, "submitted a form containing a password field"
+
+
+LINKS_AND_BUTTONS = (
+    b"<!doctype html><title>Both</title><h1>Both</h1>"
+    + b"".join(f"<button>Panel {i}</button>".encode() for i in range(14))
+    + b"<a href='/about'>About</a><a href='/deep'>Deep</a>"
+)
+
+
+class _LinkButtonHandler(_Handler):
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0].rstrip("/") or "/"
+        if path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(LINKS_AND_BUTTONS)))
+            self.end_headers()
+            self.wfile.write(LINKS_AND_BUTTONS)
+            return
+        super().do_GET()
+
+
+@contextmanager
+def _link_and_button_server():
+    srv = _Server(("127.0.0.1", 0), _LinkButtonHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+MANY_BUTTONS = (
+    b"<!doctype html><title>App</title><h1>App</h1>"
+    + b"".join(f"<button>Panel {i}</button>".encode() for i in range(14))
+    + b"<a href='https://elsewhere.example.com/x'>Off site</a>"
+)
+
+
+class _ManyButtonHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(MANY_BUTTONS)))
+        self.end_headers()
+        self.wfile.write(MANY_BUTTONS)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _many_button_server():
+    srv = _Server(("127.0.0.1", 0), _ManyButtonHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_button_routed_site_is_flagged_as_likely_incomplete():
+    """`frontier: 0` on a button-routed site reads as success and is not. The
+    map must say so itself -- this is the isekaizero case, where 39 buttons
+    yielded 3 link-discovered routes and the output looked complete."""
+    with _many_button_server() as base:
+        site = _map(base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0")
+    assert site["frontier"] == [] and site["route_count"] == 1
+    hint = site["navigation_hint"]
+    assert hint and "LIKELY INCOMPLETE" in hint, f"no incompleteness hint: {hint!r}"
+    assert "--probe-buttons" in hint
+
+
+def test_no_incompleteness_hint_when_links_actually_yield_routes():
+    """No crying wolf -- and the fixture must be able to trigger the hint.
+
+    An earlier version used a button-free page, so the heuristic returned early
+    on the button count and the link-yield half was never exercised. It passed
+    while `link_discoveries` was permanently 0, i.e. while the discriminator was
+    dead. This page carries enough buttons to clear that gate, so silence here
+    can only come from links actually yielding routes.
+    """
+    with _link_and_button_server() as base:
+        site = _map(base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0")
+    assert site["buttons_seen"] >= 10, "fixture cannot reach the link-yield check"
+    assert site["link_discoveries"] > 0, "link discovery counter is not wired"
+    assert site["navigation_hint"] is None, site["navigation_hint"]
