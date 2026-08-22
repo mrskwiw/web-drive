@@ -305,12 +305,15 @@ _STATE_JS = (
 
 
 # URL patterns dropped when a run only cares about structure. Measured against
-# isekaizero.com, where the full page costs 177 requests: blocking these leaves
-# 56 and finds MORE controls, because broken images stop occluding what is under
-# them.
+# isekaizero.com over 4 loads per condition: requests fall from a median of 184
+# to 46 (~75%), which is the entire point on a rate-limited crawl. Control counts
+# were 162 median unblocked vs 152 blocked, with heavily overlapping ranges
+# (157-172 vs 120-168) because the page rotates its content per load -- so a
+# small loss cannot be ruled out, and any single-run comparison here is noise.
+# Re-measure with repeats before trusting a claim about this trade.
 #
-# The three exclusions are each load-bearing, and each was established by
-# experiment rather than assumption:
+# The exclusions are each load-bearing, and each was established by experiment
+# rather than assumption:
 #
 # * FONTS ARE NOT BLOCKED. This looks like the safest thing in the list and is
 #   the most dangerous. Blocking fonts took isekaizero from 159 controls to
@@ -322,8 +325,13 @@ _STATE_JS = (
 #   (getBoundingClientRect + computed display/visibility), so dropping CSS
 #   collapses real controls to zero size and reveals normally-hidden menus.
 # * SCRIPTS ARE NOT BLOCKED. An SPA has no DOM without them.
+# * SVG IS NOT BLOCKED. It is nominally an image, but it is what icon buttons,
+#   nav glyphs and logos are actually made of -- the same shape as the font
+#   failure above. Measurement settled it rather than argument: dropping it from
+#   the list cost ONE request out of 46. Zero benefit against a real risk to the
+#   controls the map exists to record.
 _BLOCKED_URL_PATTERNS = [
-    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif",
     "*.ico", "*.bmp", "*.mp4", "*.webm", "*.mp3", "*.wav", "*.ogg",
 ]
 

@@ -1020,5 +1020,13 @@ def test_fonts_are_never_in_the_asset_blocklist():
             f"*.{ext} must never be blocked: fonts and CSS gate render and "
             f"visibility; scripts are the DOM on an SPA"
         )
+    # SVG is nominally an image and was in the first version of this list. It is
+    # what icon buttons and nav glyphs are made of -- the same shape as the font
+    # failure. Measured cost of excluding it: ONE request out of 46. Zero benefit
+    # against a real risk to the controls the map exists to record.
+    assert "*.svg" not in _BLOCKED_URL_PATTERNS, (
+        "SVG carries actionable UI (icon buttons, nav glyphs) and saves ~1 "
+        "request; blocking it trades the map's contents for nothing"
+    )
     assert "*.png" in _BLOCKED_URL_PATTERNS, "the blocklist must still block images"
 

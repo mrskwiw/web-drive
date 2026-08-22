@@ -250,6 +250,19 @@ def map(  # noqa: A001 — the subcommand really is called `map`
             await controller.close()
 
     site = asyncio.run(run())
+    if site.asset_blocking.startswith("unavailable"):
+        # The `asset_blocking` field already records this, but a field is only a
+        # disclosure to whoever reads it. --block-assets is default-ON, so the
+        # operator who never chose it is exactly the one who will not go looking
+        # -- and a request budget tuned for a blocked crawl will be ~4x too
+        # generous for an unblocked one, i.e. this is a rate-limit foot-gun.
+        click.echo(
+            f"WARNING: --block-assets requested but {site.asset_blocking}. "
+            f"This crawl fetched every image and media file, so expect several "
+            f"times the request count -- lower --max-rpm accordingly, or use "
+            f"--browser chromium.",
+            err=True,
+        )
     _emit(site.to_dict(), output)
 
 
