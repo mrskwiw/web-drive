@@ -134,6 +134,10 @@ class SiteMap:
     entry_url: str
     origin: str
     with_session: bool = False
+    # How asset blocking actually resolved ("chromium-cdp" / "off" /
+    # "unavailable: ..."). Recorded because every requests-per-route figure the
+    # crawl reports is only interpretable against what was actually fetched.
+    asset_blocking: str = "off"
     routes: List[RouteNode] = field(default_factory=list)
     skipped: List[Dict[str, Any]] = field(default_factory=list)
     capped: bool = False
@@ -170,6 +174,7 @@ class SiteMap:
             "entry_url": self.entry_url,
             "origin": self.origin,
             "with_session": self.with_session,
+            "asset_blocking": self.asset_blocking,
             "route_count": len(self.routes),
             # `capped` must travel with the data: a truncated crawl that looks
             # complete is how a generated driver silently omits half a site.
@@ -205,6 +210,11 @@ class SiteMap:
         )
         site.routes = [RouteNode.from_dict(r) for r in data.get("routes", [])]
         site.skipped = list(data.get("skipped", []))
+        # Carried, unlike the timing counters: `buttons_seen` is recomputed from
+        # ALL restored routes, so a link count that restarted at 0 each leg would
+        # compare this leg's links against the whole run's buttons and flag a
+        # perfectly link-navigable site as button-routed on every resume.
+        site.link_discoveries = int(data.get("link_discoveries", 0))
         site.frontier = [list(f) for f in data.get("frontier", [])]
         site._template_seen = dict(data.get("_template_seen", {}))
         site._collapsed = dict(data.get("_collapsed", {}))

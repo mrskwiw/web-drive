@@ -110,9 +110,10 @@ def cli() -> None:
 @click.option(
     "--block-assets/--no-block-assets",
     default=True,
-    help="Abort image/font/media/stylesheet requests while mapping. They cannot "
-    "change routes, titles or links, but dominate the request count that rate "
-    "limiters meter. Scripts are never blocked -- an SPA needs them to render.",
+    help="Abort image/font/media requests while mapping. They cannot change "
+    "routes, titles or links, but dominate the request count that rate limiters "
+    "meter. Scripts and STYLESHEETS are never blocked -- an SPA needs scripts to "
+    "render, and without CSS the visibility filter reports the wrong controls.",
 )
 @click.option(
     "--max-per-template",

@@ -852,3 +852,173 @@ def test_no_incompleteness_hint_when_links_actually_yield_routes():
     assert site["buttons_seen"] >= 10, "fixture cannot reach the link-yield check"
     assert site["link_discoveries"] > 0, "link discovery counter is not wired"
     assert site["navigation_hint"] is None, site["navigation_hint"]
+
+
+# One template, many instances, plus a heavy button surface -- the exact shape
+# isekaizero returned: 140 storyline links found, 3 walked, 137 collapsed.
+CATALOG_PAGE = (
+    b"<!doctype html><title>Catalog</title><h1>Catalog</h1>"
+    + b"".join(f"<button>Panel {i}</button>".encode() for i in range(14))
+    + b"".join(
+        f"<a href='/storylines/{i:024x}'>Story {i}</a>".encode() for i in range(30)
+    )
+)
+
+
+class _CatalogHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0].rstrip("/") or "/"
+        body = (
+            CATALOG_PAGE
+            if path == "/"
+            else b"<!doctype html><title>Story</title><p>a story</p>"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _catalog_server():
+    srv = _Server(("127.0.0.1", 0), _CatalogHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_template_collapsed_links_still_count_as_link_navigation():
+    """Our own sampling cap must not be reported as the site's failure to link.
+
+    isekaizero's map showed `collapsed_routes: 137` beside `link_discoveries: 3`
+    -- i.e. link crawling found 140 routes and we chose to walk 3. Counting only
+    the walked ones made the hint say "only 3 came from <a href>" and blame the
+    site for a limit we imposed. Any site with one high-cardinality template
+    (a blog, a catalog, a storyline list) would be libelled the same way.
+    """
+    with _catalog_server() as base:
+        site = _map(base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0")
+    assert site["collapsed_routes"] > 20, "fixture did not exercise the cap"
+    assert site["buttons_seen"] >= 14, "fixture cannot reach the link-yield check"
+    assert site["link_discoveries"] == 30, (
+        "link_discoveries counted only the links that survived the per-template "
+        f"cap: {site['link_discoveries']} vs 30 found"
+    )
+    assert site["navigation_hint"] is None, site["navigation_hint"]
+
+
+# -- asset blocking ---------------------------------------------------------
+
+# Body bytes are irrelevant: Playwright derives `resource_type` from the element
+# that initiated the request (an <img> is an "image"), not from the response, and
+# being REQUESTED AT ALL is the whole signal here.
+_FAKE_IMG = b"not-really-a-png"
+
+ASSET_PAGE = (
+    b"<!doctype html><title>Assets</title>"
+    b"<link rel='stylesheet' href='/style.css'>"
+    + b"".join(f"<img src='/img/{i}.png'>".encode() for i in range(6))
+    + b"<h1>Assets</h1>"
+)
+
+
+class _AssetHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    seen: list = []
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        type(self).seen.append(path)
+        if path.startswith("/img/"):
+            body, ctype = _FAKE_IMG, "image/png"
+        elif path == "/style.css":
+            body, ctype = b"h1{color:#111}", "text/css"
+        else:
+            body, ctype = ASSET_PAGE, "text/html; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _asset_server():
+    _AssetHandler.seen = []
+    srv = _Server(("127.0.0.1", 0), _AssetHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_block_assets_actually_blocks_images_and_spares_stylesheets():
+    """`--block-assets` was a default-ON flag that did nothing for eight releases.
+
+    The value threaded CLI -> controller -> `self._block_assets` and was then
+    never read, so every crawl pulled every image while the help text promised
+    otherwise -- and every requests-per-route figure the tool reported (the one
+    number an operator uses to choose --max-rpm) was measured on traffic the
+    operator believed had been suppressed. A no-op flag is not a missing
+    feature; it is a false claim the tool makes about its own behaviour.
+
+    The stylesheet half is the other half of the contract: CSS must still load,
+    because every snapshot decides what is `visible()` from computed style, so a
+    crawl without it would report a different set of controls.
+    """
+    common = ("--single-pass", "--delay-ms", "0", "--max-rpm", "0", "--max-depth", "0")
+    with _asset_server() as base:
+        site = _map(base, *common, "--block-assets")
+        blocked = list(_AssetHandler.seen)
+    assert not [p for p in blocked if p.startswith("/img/")], (
+        f"--block-assets still fetched images: {blocked}"
+    )
+    assert "/style.css" in blocked, "stylesheets must NOT be blocked"
+    # Requested and effective are different claims; the map must state the latter.
+    assert site["asset_blocking"] == "chromium-cdp", site["asset_blocking"]
+
+    with _asset_server() as base:
+        site = _map(base, *common, "--no-block-assets")
+        allowed = list(_AssetHandler.seen)
+    # Without this the assertion above could pass on a page that never had images.
+    assert [p for p in allowed if p.startswith("/img/")], (
+        f"fixture never loaded images even unblocked: {allowed}"
+    )
+    assert site["asset_blocking"] == "off", site["asset_blocking"]
+
+
+def test_fonts_are_never_in_the_asset_blocklist():
+    """Fonts look like the safest thing to block and are the most dangerous.
+
+    Blocking them took isekaizero.com from 159 controls to ZERO with an empty
+    body: its nav is an icon font and the app gates its render on the font
+    resolving. That failure is invisible -- the crawl does not error, it reports
+    a confident empty map -- so the constant is asserted directly rather than
+    trusted to a fixture, since reproducing a font-gated render locally would
+    test the fixture more than the rule.
+    """
+    from engine.browser import _BLOCKED_URL_PATTERNS
+
+    for ext in ("woff", "woff2", "ttf", "otf", "eot", "css", "js"):
+        assert f"*.{ext}" not in _BLOCKED_URL_PATTERNS, (
+            f"*.{ext} must never be blocked: fonts and CSS gate render and "
+            f"visibility; scripts are the DOM on an SPA"
+        )
+    assert "*.png" in _BLOCKED_URL_PATTERNS, "the blocklist must still block images"
+

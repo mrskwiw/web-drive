@@ -304,6 +304,30 @@ _STATE_JS = (
 )
 
 
+# URL patterns dropped when a run only cares about structure. Measured against
+# isekaizero.com, where the full page costs 177 requests: blocking these leaves
+# 56 and finds MORE controls, because broken images stop occluding what is under
+# them.
+#
+# The three exclusions are each load-bearing, and each was established by
+# experiment rather than assumption:
+#
+# * FONTS ARE NOT BLOCKED. This looks like the safest thing in the list and is
+#   the most dangerous. Blocking fonts took isekaizero from 159 controls to
+#   ZERO with an empty body -- its nav is an icon font (private-use glyphs like
+#   ), and the app gates its render on the font resolving. A font blocklist
+#   does not degrade such a page, it erases it, and the crawl reports a
+#   confident empty map.
+# * STYLESHEETS ARE NOT BLOCKED. Every snapshot filters through `visible()`
+#   (getBoundingClientRect + computed display/visibility), so dropping CSS
+#   collapses real controls to zero size and reveals normally-hidden menus.
+# * SCRIPTS ARE NOT BLOCKED. An SPA has no DOM without them.
+_BLOCKED_URL_PATTERNS = [
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg",
+    "*.ico", "*.bmp", "*.mp4", "*.webm", "*.mp3", "*.wav", "*.ogg",
+]
+
+
 class BrowserController:
     """Drive a single page and capture its observable state."""
 
@@ -321,6 +345,10 @@ class BrowserController:
         block_assets: bool = False,
     ) -> None:
         self._block_assets = block_assets
+        # How asset blocking actually resolved, set by launch(). Carried into the
+        # sitemap so "I asked for blocking" and "blocking happened" can never
+        # again be assumed to be the same statement.
+        self.asset_blocking = "off"
         self._engine = engine
         self._headless = headless
         self._viewport = {"width": viewport_width, "height": viewport_height}
@@ -387,7 +415,32 @@ class BrowserController:
         self._context = await self._browser.new_context(**ctx_kwargs)
         self._page = await self.context.new_page()
         self.page.set_default_timeout(self._timeout)
+        if self._block_assets:
+            self.asset_blocking = await self._install_asset_blocking()
         self._wire_listeners()
+
+    async def _install_asset_blocking(self) -> str:
+        """Drop weight-only assets at the network stack, and report how.
+
+        Deliberately NOT Playwright's `context.route()`. Routing enables CDP
+        request interception for the WHOLE context regardless of how narrow the
+        url pattern is, and that alone is enough to break a real app: on
+        isekaizero, a route handler that merely called `continue_()` on every
+        request took the page from 156 controls to 2. The pattern argument
+        chooses what reaches your handler, not what gets intercepted.
+
+        `Network.setBlockedURLs` is a network-stack blocklist instead, so
+        unmatched requests travel the ordinary path untouched. The cost is that
+        it is Chromium-only -- which is reported rather than silently ignored,
+        since a control that quietly does nothing is the exact defect this
+        method was written to fix.
+        """
+        if self._engine is not BrowserEngine.CHROMIUM:
+            return f"unavailable: {self._engine.value} has no CDP blocklist"
+        cdp = await self.context.new_cdp_session(self.page)
+        await cdp.send("Network.enable")
+        await cdp.send("Network.setBlockedURLs", {"urls": _BLOCKED_URL_PATTERNS})
+        return "chromium-cdp"
 
     async def save_session(self, path: str, user_agent: Optional[str] = None) -> str:
         """Persist the live context's auth session (cookies + localStorage) plus the

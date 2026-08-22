@@ -351,6 +351,10 @@ async def crawl(
         collapsed = {}
     probed_labels: Set[str] = set()
     probed_forms: Set[str] = set()
+    # Distinct same-origin targets reached via <a href> this leg. Kept separate
+    # from `seen` (which also holds button/form finds and the entry) so the
+    # navigation heuristic below measures the LINK mechanism specifically.
+    link_targets: Set[str] = set()
     first = True
     fetched = 0  # routes actually visited THIS leg (resumed ones were not)
 
@@ -508,13 +512,21 @@ async def crawl(
             # are counted, not crawled: the map records that the template has N
             # instances, which is the fact a driver needs, without paying N page
             # loads to learn one page shape.
+            # Counted BEFORE the per-template cap, and de-duped by target rather
+            # than by increment, because this number answers "does this site
+            # navigate by link?" -- a question our own sampling policy must not
+            # be allowed to answer for it. isekaizero found 140 storyline links
+            # and deliberately walked 3; counting only the walked ones reported
+            # `link_discoveries: 3` and blamed the site for a cap we imposed.
+            if target not in link_targets:
+                link_targets.add(target)
+                site.link_discoveries += 1
             tmpl = templatize(urlparse(target).path or "/")
             template_seen[tmpl] = template_seen.get(tmpl, 0) + 1
             if template_seen[tmpl] > max_per_template:
                 collapsed[tmpl] = collapsed.get(tmpl, 0) + 1
                 continue
             seen.add(target)
-            site.link_discoveries += 1
             queue.append((target, depth + 1, f"link:{link.text or link.href}"))
 
     # Whatever is still queued travels with the result, so this map can be
@@ -571,6 +583,7 @@ async def crawl(
             f"Re-run with --probe-buttons (add --fill-forms if sections sit "
             f"behind search/filter gates)."
         )
+    site.asset_blocking = getattr(controller, "asset_blocking", "off")
     site.collapsed_routes = sum(collapsed.values())
     site._template_seen = template_seen
     site._collapsed = collapsed
