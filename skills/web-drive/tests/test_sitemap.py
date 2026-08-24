@@ -907,7 +907,12 @@ def test_template_collapsed_links_still_count_as_link_navigation():
     (a blog, a catalog, a storyline list) would be libelled the same way.
     """
     with _catalog_server() as base:
-        site = _map(base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0")
+        # Explicit: sampling is opt-in now, so a test about what sampling reports
+        # has to ask for it rather than inherit it from a default.
+        site = _map(
+            base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0",
+            "--max-per-template", "3",
+        )
     assert site["collapsed_routes"] > 20, "fixture did not exercise the cap"
     assert site["buttons_seen"] >= 14, "fixture cannot reach the link-yield check"
     assert site["link_discoveries"] == 30, (
@@ -915,6 +920,122 @@ def test_template_collapsed_links_still_count_as_link_navigation():
         f"cap: {site['link_discoveries']} vs 30 found"
     )
     assert site["navigation_hint"] is None, site["navigation_hint"]
+
+
+# -- sampling applies to every discovery mechanism ---------------------------
+
+BUTTON_TEMPLATE_PAGE = (
+    b"<!doctype html><title>Items</title><h1>Items</h1>"
+    + b"".join(
+        f"<button onclick=\"location.href='/item/a{i:015x}'\">Item {i}</button>".encode()
+        for i in range(6)
+    )
+)
+
+
+class _ButtonTemplateHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0].rstrip("/") or "/"
+        body = (
+            BUTTON_TEMPLATE_PAGE
+            if path == "/"
+            else b"<!doctype html><title>Item</title><p>an item</p>"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _button_template_server():
+    srv = _Server(("127.0.0.1", 0), _ButtonTemplateHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_per_template_sampling_applies_to_button_discovered_routes():
+    """Sampling was enforced only inside the <a href> loop.
+
+    Button and form finds were queued straight past it, so the cap that makes a
+    content-heavy crawl finishable was inactive on exactly the sites
+    --probe-buttons exists for. The isekaizero run walked five instances of one
+    character template under a cap of three, spending a quarter of its page
+    budget to learn one page shape -- and reported `collapsed: 0`, so the output
+    could not even reveal that sampling had been skipped.
+    """
+    with _button_template_server() as base:
+        site = _map(
+            base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0",
+            "--probe-buttons", "--max-per-template", "2",
+        )
+    walked = [r for r in site["routes"] if r["path"].startswith("/item/")]
+    assert len(walked) == 2, f"cap of 2 not applied to button finds: {len(walked)}"
+    assert site["collapsed_routes"] >= 1, (
+        "instances declined by the cap must be COUNTED, not silently dropped -- "
+        "`collapsed` is the field that distinguishes 'there are 2' from 'we "
+        "walked 2 of 6'"
+    )
+    tmpl = [t for t in site["templates"] if t["template"] == "/item/{hex}"]
+    assert tmpl and tmpl[0]["instances_seen"] > 2, tmpl
+
+
+# -- traversal is uncapped; time is the guard --------------------------------
+
+
+def test_traversal_is_unbounded_by_default():
+    """No page cap, no depth cap, no per-template sampling unless asked.
+
+    The catalog fixture is 30 instances of ONE template behind a home page. The
+    old defaults (max-pages 40, max-depth 3, max-per-template 3) walked 3 of them
+    and reported `collapsed_routes: 27`; a map that samples by default makes
+    "complete" and "partial" indistinguishable without reading two other fields.
+    """
+    with _catalog_server() as base:
+        site = _map(base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0")
+    assert site["route_count"] == 31, f"expected home + 30 stories: {site['route_count']}"
+    assert site["collapsed_routes"] == 0, "nothing may be sampled away by default"
+    assert site["capped"] is False and site["timed_out"] is False
+    assert site["frontier"] == [], "an exhausted crawl leaves nothing queued"
+
+
+def test_time_budget_stops_the_crawl_and_leaves_it_resumable():
+    """The one guard that replaced the caps must actually bind -- and a run it
+    stops must be continuable, or it is just a cap that loses data."""
+    with _catalog_server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0", "--time-budget-s", "1")
+    assert site["timed_out"] is True, "the time budget never fired"
+    assert site["route_count"] < 31, "stopped, yet somehow walked the whole site"
+    assert site["frontier"], "a timed-out crawl must carry its remaining queue"
+    assert "PARTIAL" in (site["stopped_reason"] or ""), site["stopped_reason"]
+
+
+def test_capped_run_does_not_livelock_on_auto_resume(tmp_path):
+    """--max-pages counts the WHOLE map, so a resumed leg starts already at the
+    cap, fetches nothing, and hands back an identical frontier.
+
+    With --max-legs removed this looped forever; the leg count had been serving
+    as an accidental livelock guard, which meant the loop never had a real one.
+    Progress is the condition that actually matters.
+    """
+    with _server() as base:
+        site = _map(base, "--max-pages", "2", "--delay-ms", "0", "--max-rpm", "0")
+    assert site["capped"] is True
+    assert site["frontier"], "the cap must still leave a resumable frontier"
+    assert "cap counted over the whole map" in (site["stopped_reason"] or ""), (
+        site["stopped_reason"]
+    )
 
 
 # -- asset blocking ---------------------------------------------------------

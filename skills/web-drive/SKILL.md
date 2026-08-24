@@ -98,12 +98,48 @@ skill is replayable by the other.
 ### 0. Map the route graph
 
 ```bash
-python -m engine.cli map --url <URL> --output sitemap.json
+python -m engine.cli map --url <URL> --probe-buttons --fill-forms --output sitemap.json
 ```
 
 Breadth-first from the entry URL, same-origin only, recording for each route
 whether it was reachable, what it redirected to, and whether it required auth.
 Pass `--session <bundle>` to map authenticated routes (same session-bundle
 format as web-qa's `flow --save-session`).
+
+**Traversal is exhaustive by default.** There is no page cap, no depth cap and
+no per-template sampling unless you ask for one. Only three things bound a
+crawl:
+
+- **same origin** — off-origin links are recorded under `skipped`, never followed;
+- **visit once** — every URL is normalized and fetched at most once;
+- **`--time-budget-s`** (default 3600) — wall clock for the whole run, including
+  auto-resume legs.
+
+That ordering is deliberate. A page or depth cap decides *in advance* which
+parts of a site matter, and it does so silently — which is how a map comes back
+looking complete while describing a fraction of an app. A clock bounds cost
+without pre-judging coverage, and it is recoverable: the frontier travels in the
+output, so `--resume <sitemap.json>` continues from exactly where it stopped.
+
+**Always read the three trust flags before believing a map.** `capped`,
+`timed_out` and `rate_limited` each mean "this is partial", and each leaves the
+frontier intact for a resume. A map with `frontier: []` and all three false is
+the only one that claims the site was actually exhausted.
+
+`--probe-buttons` is what reaches an SPA's real surface — on a button-routed app
+the link crawler finds almost nothing (isekaizero: 16 of 20 routes came from
+buttons, and its entire app shell was unreachable by `<a href>`). It costs a page
+load per candidate, so it is the main driver of runtime. `--fill-forms` reaches
+what sits behind search and filter gates; it never submits a form marked
+destructive or one containing a password field.
+
+The remaining caps are opt-in, for a deliberately partial survey:
+`--max-pages`, `--max-depth`, `--max-per-template`, `--max-probes`,
+`--max-legs`. Each is disclosed in the output when it binds.
+
+Pacing is not a cap and stays on: `--max-rpm` (default 120) meters *requests*,
+the unit limiters actually count, and `--block-assets` (default on, Chromium
+only) drops images and media — roughly a 75% request cut. Neither limits what
+gets mapped.
 
 *Phases B–H are not implemented yet.*

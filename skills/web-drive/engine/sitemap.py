@@ -182,7 +182,8 @@ async def probe_buttons(
     controls: List[Any],
     origin: str,
     probed_labels: Set[str],
-    max_probes: int = 8,
+    max_probes: Optional[int] = None,
+    scope: str = "",
 ) -> List[Tuple[str, str]]:
     """Click navigation-looking buttons to find routes no <a href> exposes.
 
@@ -195,19 +196,25 @@ async def probe_buttons(
     found: List[Tuple[str, str]] = []
     budget = max_probes
     for ctl in controls:
-        if budget <= 0:
+        if budget is not None and budget <= 0:
             break
         label = (ctl.get("text") or "").strip().lower()
         if ctl.get("role") != "button" or not is_probe_safe(label):
             continue
-        # Dedup by LABEL across the whole crawl. A dashboard nav renders on every
-        # route, so probing "Projects" once per page turns an O(routes) crawl into
-        # O(routes x buttons) -- which is what made the first live attempt exceed
-        # ten minutes without finishing. One click per distinct label suffices.
-        if label in probed_labels:
+        # Dedup by (route template, label) rather than by label alone. A dashboard
+        # nav renders on every route, so probing "Projects" once per page turns an
+        # O(routes) crawl into O(routes x buttons) -- the thing that made the first
+        # live attempt exceed ten minutes without finishing. But deduping GLOBALLY
+        # overshot: a "Next" or "View" button means something different on every
+        # template, and a global set meant the second template's copy was never
+        # clicked. Scoping to the template keeps the nav-bar saving while letting
+        # a shared label be followed once per page shape.
+        key = f"{scope}|{label}"
+        if key in probed_labels:
             continue
-        probed_labels.add(label)
-        budget -= 1
+        probed_labels.add(key)
+        if budget is not None:
+            budget -= 1
         try:
             await controller.navigate(url)
             before = controller.page.url
@@ -292,19 +299,34 @@ async def probe_forms(
 async def crawl(
     controller: BrowserController,
     entry_url: str,
-    max_pages: int = 40,
-    max_depth: int = 3,
+    max_pages: Optional[int] = None,
+    max_depth: Optional[int] = None,
     with_session: bool = False,
     delay_ms: int = 250,
     max_retries: int = 3,
     backoff_ms: int = 2000,
     max_rpm: int = 120,
-    max_per_template: int = 3,
+    max_per_template: Optional[int] = None,
     probe_buttons_enabled: bool = False,
     fill_forms_enabled: bool = False,
+    max_probes: Optional[int] = None,
+    deadline: Optional[float] = None,
     resume: Optional[dict] = None,
 ) -> SiteMap:
     """Breadth-first walk of the same-origin route graph from ``entry_url``.
+
+    **Traversal is unbounded by default.** ``max_pages``, ``max_depth``,
+    ``max_per_template`` and ``max_probes`` all accept ``None`` meaning "no
+    limit", and that is the default. What actually terminates a crawl is the
+    structure of the site itself: same-origin only, and every URL visited at most
+    once. The coverage caps remain available for a deliberately partial run, but
+    a cap silently applied is how a map comes back looking complete while
+    describing a fraction of an app.
+
+    The real guard is ``deadline`` (a ``time.monotonic()`` timestamp). Wall clock
+    bounds a crawl without deciding in advance which parts of the site matter,
+    which is exactly what a page or depth cap does. Hitting it is not data loss:
+    the frontier travels in the output, so the run resumes where it stopped.
 
     Rate-limit behaviour (added after a live run exhausted a real app's quota):
 
@@ -359,10 +381,20 @@ async def crawl(
     fetched = 0  # routes actually visited THIS leg (resumed ones were not)
 
     while queue:
-        if len(site.routes) >= max_pages:
+        if max_pages is not None and len(site.routes) >= max_pages:
             # More was reachable than we visited — say so rather than implying
             # the graph is complete.
             site.capped = True
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            # The one guard that does not pre-judge which parts of a site matter.
+            # Disclosed like `capped`, and resumable: the frontier rides along.
+            site.timed_out = True
+            site.stopped_reason = (
+                f"time budget reached with {len(queue)} route(s) still queued. "
+                f"This map is PARTIAL -- re-run with --resume to continue from "
+                f"the saved frontier, or raise --time-budget-s."
+            )
             break
         url, depth, viaction = queue.pop(0)
 
@@ -474,13 +506,19 @@ async def crawl(
         # the handler would list a route twice when a link raised mid-loop.
         site.routes.append(node)
         fetched += 1
-        if node.error or depth >= max_depth:
+        if node.error or (max_depth is not None and depth >= max_depth):
             continue
 
         discovered: List[Tuple[str, str]] = []
         if probe_buttons_enabled and node.controls:
             for tgt, via in await probe_buttons(
-                controller, node.final_url, node.controls, origin, probed_labels
+                controller,
+                node.final_url,
+                node.controls,
+                origin,
+                probed_labels,
+                max_probes=max_probes,
+                scope=templatize(node.path),
             ):
                 if tgt not in seen:
                     discovered.append((tgt, via))
@@ -492,10 +530,22 @@ async def crawl(
                 if tgt not in seen:
                     discovered.append((tgt, via))
 
+        # Button and form finds go through the SAME template accounting as links.
+        # They did not, and the cap was therefore inactive precisely on the sites
+        # --probe-buttons exists for: the isekaizero run walked five instances of
+        # one character template under a cap of three, spending a quarter of its
+        # page budget to learn one page shape, and `collapsed: 0` gave no hint
+        # that sampling had been skipped.
         for tgt, via in discovered:
-            if tgt not in seen:
-                seen.add(tgt)
-                queue.append((tgt, depth + 1, via))
+            if tgt in seen:
+                continue
+            tmpl = templatize(urlparse(tgt).path or "/")
+            template_seen[tmpl] = template_seen.get(tmpl, 0) + 1
+            if max_per_template is not None and template_seen[tmpl] > max_per_template:
+                collapsed[tmpl] = collapsed.get(tmpl, 0) + 1
+                continue
+            seen.add(tgt)
+            queue.append((tgt, depth + 1, via))
 
         for link in links:
             target, reason = _resolve(link, node.final_url, origin)
@@ -523,7 +573,7 @@ async def crawl(
                 site.link_discoveries += 1
             tmpl = templatize(urlparse(target).path or "/")
             template_seen[tmpl] = template_seen.get(tmpl, 0) + 1
-            if template_seen[tmpl] > max_per_template:
+            if max_per_template is not None and template_seen[tmpl] > max_per_template:
                 collapsed[tmpl] = collapsed.get(tmpl, 0) + 1
                 continue
             seen.add(target)

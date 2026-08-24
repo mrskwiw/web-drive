@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -84,10 +85,19 @@ def cli() -> None:
 @click.option("--headless/--no-headless", default=True)
 @click.option(
     "--max-pages",
-    default=40,
-    help="Stop after this many routes. The cap is disclosed as `capped` in the output.",
+    default=None,
+    type=int,
+    help="Stop after this many routes. UNSET BY DEFAULT -- traversal is bounded "
+    "by --time-budget-s, not by a page count, because a page cap decides in "
+    "advance which parts of a site matter. Disclosed as `capped` when set and hit.",
 )
-@click.option("--max-depth", default=3, help="Link depth from the entry URL.")
+@click.option(
+    "--max-depth",
+    default=None,
+    type=int,
+    help="Link depth from the entry URL. Unset by default (no depth limit); the "
+    "crawl terminates on same-origin plus visit-once, or on the time budget.",
+)
 @click.option(
     "--delay-ms",
     default=750,
@@ -117,9 +127,28 @@ def cli() -> None:
 )
 @click.option(
     "--max-per-template",
-    default=3,
+    default=None,
+    type=int,
     help="How many instances of one route template (e.g. /quiz/{uuid}) to walk "
-    "before counting the rest as collapsed.",
+    "before counting the rest as collapsed. Unset by default -- every instance "
+    "is walked. Set it for a fast structural survey of a content-heavy site.",
+)
+@click.option(
+    "--max-probes",
+    default=None,
+    type=int,
+    help="Cap button probes per route. Unset by default. Probes are already "
+    "deduped per (route template, label), so a nav bar is clicked once per page "
+    "shape rather than once per page.",
+)
+@click.option(
+    "--time-budget-s",
+    default=3600,
+    help="Wall-clock guard for the WHOLE run, including auto-resume legs. This "
+    "is the primary bound now that coverage caps are off: it limits cost without "
+    "pre-judging which parts of a site matter, and it is recoverable -- the "
+    "frontier travels in the output, so --resume continues from the stopping "
+    "point. 0 disables it, which makes the crawl genuinely unbounded.",
 )
 @click.option(
     "--probe-buttons/--no-probe-buttons",
@@ -138,9 +167,11 @@ def cli() -> None:
 )
 @click.option(
     "--max-legs",
-    default=12,
-    help="Safety bound on auto-resume legs, so a site that never exhausts (or a "
-    "limiter that never relents) cannot loop forever.",
+    default=None,
+    type=int,
+    help="Bound auto-resume legs. Unset by default -- --time-budget-s already "
+    "stops a site that never exhausts, and a leg count was a second cap doing "
+    "the same job in a unit nobody can reason about.",
 )
 @click.option(
     "--cooldown-s",
@@ -186,17 +217,19 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     url: str,
     engine: str,
     headless: bool,
-    max_pages: int,
-    max_depth: int,
+    max_pages: int | None,
+    max_depth: int | None,
     delay_ms: int,
     max_retries: int,
     max_rpm: int,
     block_assets: bool,
-    max_per_template: int,
+    max_per_template: int | None,
+    max_probes: int | None,
+    time_budget_s: int,
     probe_buttons: bool,
     fill_forms: bool,
     until_exhausted: bool,
-    max_legs: int,
+    max_legs: int | None,
     cooldown_s: int,
     resume_path: str | None,
     session: str | None,
@@ -239,12 +272,18 @@ def map(  # noqa: A001 — the subcommand really is called `map`
                 max_retries=max_retries,
                 max_rpm=max_rpm,
                 max_per_template=max_per_template,
+                max_probes=max_probes,
                 probe_buttons_enabled=probe_buttons,
                 fill_forms_enabled=fill_forms,
                 resume=resume,
                 until_exhausted=until_exhausted,
                 max_legs=max_legs,
                 cooldown_s=cooldown_s,
+                # Computed ONCE for the whole run, not per leg: a per-leg budget
+                # multiplied by an unbounded leg count is not a bound at all.
+                deadline=(
+                    time.monotonic() + time_budget_s if time_budget_s > 0 else None
+                ),
             )
         finally:
             await controller.close()
@@ -279,7 +318,7 @@ def _apply_totals(site, totals) -> None:
 
 
 async def _crawl_until_done(
-    controller, url, *, until_exhausted, max_legs, cooldown_s, **kw
+    controller, url, *, until_exhausted, max_legs, cooldown_s, deadline, **kw
 ):
     """Run legs until the frontier empties, adapting to the limiter as it goes.
 
@@ -294,8 +333,14 @@ async def _crawl_until_done(
     cooldown = cooldown_s
     site = None
     totals = {"requests": 0, "elapsed": 0.0, "throttled": 0, "legs": 0}
-    for leg in range(1, max_legs + 1):
-        site = await crawl(controller, url, max_rpm=rpm, resume=state, **kw)
+    leg = 0
+    routes_before = -1
+    while max_legs is None or leg < max_legs:
+        leg += 1
+        routes_before = len(site.routes) if site is not None else -1
+        site = await crawl(
+            controller, url, max_rpm=rpm, resume=state, deadline=deadline, **kw
+        )
         # The profile must describe the whole RUN. Reporting only the final leg
         # made a run whose last leg found nothing report zero requests -- a
         # tuning number that is not merely wrong but inverted.
@@ -306,18 +351,57 @@ async def _crawl_until_done(
         _apply_totals(site, totals)
         if not until_exhausted or not site.frontier:
             break
+        # A page cap is a TOTAL, so a resumed leg starts already at it, fetches
+        # nothing and hands back the same frontier -- forever. `--max-legs` was
+        # quietly serving as the livelock guard; removing it exposed that the
+        # loop never had a real one. Progress, not a leg count, is the condition
+        # that actually matters here.
+        if site.capped:
+            site.stopped_reason = (
+                (site.stopped_reason or "")
+                + f" | stopped at the --max-pages cap with {len(site.frontier)} "
+                f"route(s) queued; resuming cannot pass a cap counted over the "
+                f"whole map. Raise --max-pages or drop it."
+            ).strip(" |")
+            break
+        if len(site.routes) <= routes_before:
+            site.stopped_reason = (
+                (site.stopped_reason or "")
+                + f" | auto-resume made no progress on leg {leg} with "
+                f"{len(site.frontier)} route(s) still queued -- every remaining "
+                f"route failed or was refused, so further legs would only repeat."
+            ).strip(" |")
+            break
+        if site.timed_out or (deadline is not None and time.monotonic() >= deadline):
+            # `crawl` already recorded why and left the frontier intact. Starting
+            # another leg past the deadline would spend the budget the guard
+            # exists to hold.
+            break
         if site.rate_limited:
             # Back off on BOTH axes: wait longer, and ask for less next time.
+            # Never cool down past the deadline -- sleeping through the budget
+            # and then reporting "stopped on time" would blame the clock for a
+            # wait we chose.
+            if deadline is not None:
+                cooldown = min(cooldown, max(0, deadline - time.monotonic()))
             await asyncio.sleep(cooldown)
-            cooldown = min(cooldown * 2, 600)
+            cooldown = min(max(cooldown, 1) * 2, 600)
             rpm = max(20, int(rpm * 0.6))
         state = site.to_dict()
     if site is not None:
         _apply_totals(site, totals)
-    # Only an auto-resume run can 'give up'. On --single-pass a non-empty
-    # frontier is the expected outcome, and claiming otherwise would report a
-    # failure that never happened.
-    if until_exhausted and site is not None and site.frontier:
+    # Only an auto-resume run can 'give up', and only for a reason not already
+    # recorded. On --single-pass a non-empty frontier is the expected outcome,
+    # and a timed-out run already carries `crawl`'s own explanation -- appending
+    # a leg-exhaustion note there would attribute the stop to the wrong guard.
+    if (
+        until_exhausted
+        and site is not None
+        and site.frontier
+        and not site.timed_out
+        and max_legs is not None
+        and leg >= max_legs
+    ):
         site.stopped_reason = (
             (site.stopped_reason or "")
             + f" | auto-resume stopped after {max_legs} legs with "

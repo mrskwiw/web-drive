@@ -145,6 +145,10 @@ class SiteMap:
     # about the TRUSTWORTHINESS of the data, not a log line — a consumer that
     # ignores it can build a driver from routes the crawler itself starved.
     rate_limited: bool = False
+    # Stopped on the wall-clock guard rather than because the site ran out. Like
+    # `capped`, a statement about how far to trust the map -- and like `capped`,
+    # recoverable: the frontier rides in the output, so --resume continues it.
+    timed_out: bool = False
     throttled_routes: int = 0
     stopped_reason: Optional[str] = None
     rate_limit: RateLimitProfile = field(default_factory=RateLimitProfile)
@@ -180,6 +184,7 @@ class SiteMap:
             # complete is how a generated driver silently omits half a site.
             "capped": self.capped,
             "rate_limited": self.rate_limited,
+            "timed_out": self.timed_out,
             "throttled_routes": self.throttled_routes,
             "stopped_reason": self.stopped_reason,
             "rate_limit": self.rate_limit.to_dict(),
