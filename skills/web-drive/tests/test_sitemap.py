@@ -922,6 +922,95 @@ def test_template_collapsed_links_still_count_as_link_navigation():
     assert site["navigation_hint"] is None, site["navigation_hint"]
 
 
+# -- faceted pages collapse to one route plus a parameter schema -------------
+
+FACET_PAGE = (
+    b"<!doctype html><title>Browse</title><h1>Browse</h1>"
+    + b"".join(
+        f"<a href='/browse?category={c}&sort={s}'>{c}/{s}</a>".encode()
+        for c in ("romance", "mystery", "sliceOfLife", "horror")
+        for s in ("trending", "newest", "random")
+    )
+)
+
+
+class _FacetHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0].rstrip("/") or "/"
+        body = FACET_PAGE if path == "/" else b"<!doctype html><title>B</title><p>b</p>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _facet_server():
+    srv = _Server(("127.0.0.1", 0), _FacetHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_query_variants_collapse_to_one_route_with_a_parameter_schema():
+    """A faceted browse page is ONE route with a parameter space, not N routes.
+
+    isekaizero's /explore minted a URL per filter chip: 37 variants observed, 10
+    walked, 27 still queued, consuming most of a 45-minute budget to learn one
+    page shape. The space is combinatorial, so an uncapped crawl of it does not
+    converge -- this is the one thing "same origin + visit once + a clock" does
+    not bound.
+
+    What survives sampling is the thing a driver can actually use: the parameter
+    VOCABULARY. `browse --category romance --sort trending` generalizes; a list
+    of twelve URLs does not.
+    """
+    with _facet_server() as base:
+        site = _map(base, "--single-pass", "--delay-ms", "0", "--max-rpm", "0",
+                    "--max-query-variants", "2")
+    browsed = [r for r in site["routes"] if r["path"] == "/browse"]
+    assert len(browsed) == 2, f"variant cap not applied: {len(browsed)} walked"
+
+    tmpl = next(t for t in site["templates"] if t["template"] == "/browse")
+    assert tmpl["variants_seen"] == 12, (
+        f"all variants must be COUNTED even when not walked: {tmpl['variants_seen']}"
+    )
+    assert tmpl["variants_collapsed"] == 10, tmpl["variants_collapsed"]
+
+    # The vocabulary is recorded from EVERY variant, sampled or not -- it must not
+    # depend on which ones happened to fall inside the sample.
+    params = tmpl["params"]
+    assert set(params) == {"category", "sort"}, params
+    assert set(params["category"]["values"]) == {
+        "romance", "mystery", "sliceOfLife", "horror",
+    }, params["category"]
+    assert set(params["sort"]["values"]) == {"trending", "newest", "random"}
+
+
+def test_faceted_crawl_converges_instead_of_running_out_the_clock():
+    """The whole point: with variants collapsed the crawl EXHAUSTS the site.
+
+    Without the collapse this fixture is 12 routes of one page shape; with it the
+    crawl finishes, leaving an empty frontier and none of the partial-map flags.
+    """
+    with _facet_server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0")
+    assert site["frontier"] == [], "crawl did not converge"
+    assert site["timed_out"] is False and site["capped"] is False
+    tmpl = next(t for t in site["templates"] if t["template"] == "/browse")
+    assert tmpl["visited"] == 3 and tmpl["variants_seen"] == 12, tmpl
+
+
 # -- sampling applies to every discovery mechanism ---------------------------
 
 BUTTON_TEMPLATE_PAGE = (

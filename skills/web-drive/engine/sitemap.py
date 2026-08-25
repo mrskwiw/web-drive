@@ -21,8 +21,8 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Any, List, Optional, Set, Tuple
-from urllib.parse import urldefrag, urljoin, urlparse
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import parse_qs, urldefrag, urljoin, urlparse
 
 from .browser import BrowserController
 from .catalog import AuthState, RouteNode, SiteMap
@@ -64,6 +64,40 @@ def templatize(path: str) -> str:
         else:
             out.append(seg)
     return "/".join(out) or "/"
+
+
+# How many distinct values to keep per query parameter. The point is the
+# VOCABULARY (what values this filter accepts), and a facet with hundreds of tags
+# would otherwise grow the map without teaching a driver anything more.
+_MAX_PARAM_VALUES = 25
+
+
+def query_params(url: str) -> Dict[str, List[str]]:
+    """Parameter names and values from a URL's query string, order-independent."""
+    return {k: list(v) for k, v in parse_qs(urlparse(url).query).items()}
+
+
+def record_params(
+    into: Dict[str, Dict[str, Any]], template: str, url: str
+) -> None:
+    """Accumulate the observed parameter vocabulary for one route template.
+
+    A faceted browse page is ONE route with a parameter space, not N routes. What
+    a generated driver needs from `/explore?category=romance&tags=Fantasy` is
+    that `explore` accepts `category` and `tags`, and which values it has been
+    seen to take -- so the values are collected as a set per name, and each is
+    marked `truncated` once it stops being an exhaustive list.
+    """
+    bucket = into.setdefault(template, {})
+    for name, values in query_params(url).items():
+        slot = bucket.setdefault(name, {"values": [], "truncated": False})
+        for value in values:
+            if value in slot["values"]:
+                continue
+            if len(slot["values"]) >= _MAX_PARAM_VALUES:
+                slot["truncated"] = True
+                break
+            slot["values"].append(value)
 
 
 def origin_of(url: str) -> str:
@@ -184,6 +218,7 @@ async def probe_buttons(
     probed_labels: Set[str],
     max_probes: Optional[int] = None,
     scope: str = "",
+    pacer: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> List[Tuple[str, str]]:
     """Click navigation-looking buttons to find routes no <a href> exposes.
 
@@ -216,6 +251,8 @@ async def probe_buttons(
         if budget is not None:
             budget -= 1
         try:
+            if pacer is not None:
+                await pacer()
             await controller.navigate(url)
             before = controller.page.url
             await controller.perform(
@@ -247,6 +284,7 @@ async def probe_forms(
     forms: List[Any],
     origin: str,
     probed: Set[str],
+    pacer: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> List[Tuple[str, str]]:
     """Fill and submit non-destructive forms to reach what lies behind them.
 
@@ -271,6 +309,8 @@ async def probe_forms(
             continue
         probed.add(sig)
         try:
+            if pacer is not None:
+                await pacer()
             await controller.navigate(url)
             before = controller.page.url
             for f in fields:
@@ -296,6 +336,74 @@ async def probe_forms(
     return found
 
 
+class _Admission:
+    """Decides whether a discovered URL earns a page load.
+
+    One place, used by the link path and the button/form path alike, because the
+    two diverging is exactly how per-template sampling ended up inactive on the
+    sites `--probe-buttons` exists for.
+
+    Two orthogonal questions, deliberately counted separately:
+
+    * how many concrete instances of a PATH template to walk
+      (`/storylines/{hex}` had 129) -- ``max_per_template``;
+    * how many QUERY variants of the same path to walk (`/explore` had 37
+      filter combinations) -- ``max_query_variants``.
+
+    The second exists because a faceted browse page is combinatorial: every
+    filter chip mints a URL, so an uncapped crawl of one never converges. It is
+    ONE route with a parameter space, and the vocabulary is what a driver wants.
+    """
+
+    def __init__(
+        self,
+        max_per_template: Optional[int],
+        max_query_variants: Optional[int],
+        template_seen: Dict[str, int],
+        collapsed: Dict[str, int],
+        variants: Dict[str, Set[str]],
+        variants_collapsed: Dict[str, int],
+        params: Dict[str, Dict[str, Any]],
+    ) -> None:
+        self.max_per_template = max_per_template
+        self.max_query_variants = max_query_variants
+        self.template_seen = template_seen
+        self.collapsed = collapsed
+        self.variants = variants
+        self.variants_collapsed = variants_collapsed
+        self.params = params
+
+    def admits(self, target: str) -> bool:
+        """True to queue ``target``; False having COUNTED why it was declined."""
+        parts = urlparse(target)
+        tmpl = templatize(parts.path or "/")
+
+        if parts.query:
+            # Recorded before any decision: the parameter vocabulary is the
+            # product here, and it must not depend on whether this particular
+            # variant happened to fall inside the sample.
+            record_params(self.params, tmpl, target)
+            seen_variants = self.variants.setdefault(tmpl, set())
+            seen_variants.add(parts.query)
+            if (
+                self.max_query_variants is not None
+                and len(seen_variants) > self.max_query_variants
+            ):
+                self.variants_collapsed[tmpl] = (
+                    self.variants_collapsed.get(tmpl, 0) + 1
+                )
+                return False
+
+        self.template_seen[tmpl] = self.template_seen.get(tmpl, 0) + 1
+        if (
+            self.max_per_template is not None
+            and self.template_seen[tmpl] > self.max_per_template
+        ):
+            self.collapsed[tmpl] = self.collapsed.get(tmpl, 0) + 1
+            return False
+        return True
+
+
 async def crawl(
     controller: BrowserController,
     entry_url: str,
@@ -307,6 +415,7 @@ async def crawl(
     backoff_ms: int = 2000,
     max_rpm: int = 120,
     max_per_template: Optional[int] = None,
+    max_query_variants: Optional[int] = 3,
     probe_buttons_enabled: bool = False,
     fill_forms_enabled: bool = False,
     max_probes: Optional[int] = None,
@@ -358,6 +467,9 @@ async def crawl(
         site.frontier = []
         template_seen = dict(resume.get("_template_seen", {}))
         collapsed = dict(resume.get("_collapsed", {}))
+        variants = {k: set(v) for k, v in resume.get("_variants", {}).items()}
+        variants_collapsed = dict(resume.get("_variants_collapsed", {}))
+        params = {k: dict(v) for k, v in resume.get("_params", {}).items()}
         # A resumed run re-reports its own trust flags; a stale `rate_limited`
         # from the previous leg would mislabel a clean continuation.
         site.rate_limited = False
@@ -371,12 +483,19 @@ async def crawl(
         skipped_seen = set()
         template_seen = {}
         collapsed = {}
+        variants = {}
+        variants_collapsed = {}
+        params = {}
     probed_labels: Set[str] = set()
     probed_forms: Set[str] = set()
     # Distinct same-origin targets reached via <a href> this leg. Kept separate
     # from `seen` (which also holds button/form finds and the entry) so the
     # navigation heuristic below measures the LINK mechanism specifically.
     link_targets: Set[str] = set()
+    gate = _Admission(
+        max_per_template, max_query_variants,
+        template_seen, collapsed, variants, variants_collapsed, params,
+    )
     first = True
     fetched = 0  # routes actually visited THIS leg (resumed ones were not)
 
@@ -509,6 +628,14 @@ async def crawl(
         if node.error or (max_depth is not None and depth >= max_depth):
             continue
 
+        async def pacer() -> None:
+            """Probing performs full page loads INSIDE a route, and those were
+            never metered -- `pace()` ran once per route, so the request budget
+            was bypassed in proportion to the probe count. The uncapped run
+            reported 184 rpm against a 120 budget; the tool was announcing a rate
+            it did not honour."""
+            await pace(controller, started, max_rpm, baseline)
+
         discovered: List[Tuple[str, str]] = []
         if probe_buttons_enabled and node.controls:
             for tgt, via in await probe_buttons(
@@ -519,30 +646,26 @@ async def crawl(
                 probed_labels,
                 max_probes=max_probes,
                 scope=templatize(node.path),
+                pacer=pacer,
             ):
                 if tgt not in seen:
                     discovered.append((tgt, via))
 
         if fill_forms_enabled and node.forms:
             for tgt, via in await probe_forms(
-                controller, node.final_url, node.forms, origin, probed_forms
+                controller, node.final_url, node.forms, origin, probed_forms,
+                pacer=pacer,
             ):
                 if tgt not in seen:
                     discovered.append((tgt, via))
 
-        # Button and form finds go through the SAME template accounting as links.
-        # They did not, and the cap was therefore inactive precisely on the sites
-        # --probe-buttons exists for: the isekaizero run walked five instances of
-        # one character template under a cap of three, spending a quarter of its
-        # page budget to learn one page shape, and `collapsed: 0` gave no hint
-        # that sampling had been skipped.
+        # Button and form finds go through the SAME admission gate as links.
+        # They did not, and per-template sampling was therefore inactive exactly
+        # on the sites --probe-buttons exists for: the isekaizero run walked five
+        # instances of one character template under a cap of three, and reported
+        # `collapsed: 0`, so the output could not reveal that sampling was skipped.
         for tgt, via in discovered:
-            if tgt in seen:
-                continue
-            tmpl = templatize(urlparse(tgt).path or "/")
-            template_seen[tmpl] = template_seen.get(tmpl, 0) + 1
-            if max_per_template is not None and template_seen[tmpl] > max_per_template:
-                collapsed[tmpl] = collapsed.get(tmpl, 0) + 1
+            if tgt in seen or not gate.admits(tgt):
                 continue
             seen.add(tgt)
             queue.append((tgt, depth + 1, via))
@@ -571,10 +694,7 @@ async def crawl(
             if target not in link_targets:
                 link_targets.add(target)
                 site.link_discoveries += 1
-            tmpl = templatize(urlparse(target).path or "/")
-            template_seen[tmpl] = template_seen.get(tmpl, 0) + 1
-            if max_per_template is not None and template_seen[tmpl] > max_per_template:
-                collapsed[tmpl] = collapsed.get(tmpl, 0) + 1
+            if not gate.admits(target):
                 continue
             seen.add(target)
             queue.append((target, depth + 1, f"link:{link.text or link.href}"))
@@ -604,8 +724,16 @@ async def crawl(
             "visited": visited.get(t, 0),
             "instances_seen": template_seen.get(t, visited.get(t, 0)),
             "collapsed": collapsed.get(t, 0),
+            # A faceted page is one route with a parameter space. `variants_seen`
+            # is how many distinct query strings were observed, `variants_walked`
+            # how many earned a page load, and `params` the vocabulary a driver
+            # needs to construct its own -- `explore --category romance` rather
+            # than a list of 37 URLs nobody can generalize from.
+            "variants_seen": len(variants.get(t, ())),
+            "variants_collapsed": variants_collapsed.get(t, 0),
+            "params": params.get(t, {}),
         }
-        for t in sorted(set(visited) | set(template_seen))
+        for t in sorted(set(visited) | set(template_seen) | set(variants))
     ]
     site.buttons_seen = sum(
         1 for r in site.routes for c in r.controls if c.get("role") == "button"
@@ -637,6 +765,12 @@ async def crawl(
     site.collapsed_routes = sum(collapsed.values())
     site._template_seen = template_seen
     site._collapsed = collapsed
+    # Carried so a --resume leg keeps counting from where the last one stopped;
+    # restarting these would let a resumed crawl re-walk a facet space it had
+    # already sampled, which is the exact cost resuming exists to avoid.
+    site._variants = {k: sorted(v) for k, v in variants.items()}
+    site._variants_collapsed = variants_collapsed
+    site._params = params
     return site
 
 

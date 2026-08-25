@@ -133,9 +133,34 @@ load per candidate, so it is the main driver of runtime. `--fill-forms` reaches
 what sits behind search and filter gates; it never submits a form marked
 destructive or one containing a password field.
 
-The remaining caps are opt-in, for a deliberately partial survey:
-`--max-pages`, `--max-depth`, `--max-per-template`, `--max-probes`,
-`--max-legs`. Each is disclosed in the output when it binds.
+**Two caps stay on, and neither limits reachability.** They bound *effort per
+unit of coverage*, which is the opposite thing — removing them shrinks the map:
+
+- `--max-probes` (12) — button probes per route. Unlimited, a 146-control page
+  spends ~650 requests on itself and breadth-first never leaves depth 1
+  (measured: 13 routes uncapped vs 20 at 8).
+- `--max-query-variants` (3) — distinct query strings walked per path template.
+  A faceted browse page is **one route with a parameter space**: every filter
+  chip mints a URL, so the space is combinatorial and never converges.
+  isekaizero's `/explore` produced 37 variants and consumed a 45-minute budget
+  to learn one page shape.
+
+Variants beyond the sample are still counted, and **the parameter vocabulary is
+recorded from every variant whether walked or not** — that is the part a driver
+can use:
+
+```json
+{"template": "/explore", "visited": 3, "variants_seen": 37, "variants_collapsed": 34,
+ "params": {"category": {"values": ["romance", "mystery", …], "truncated": false},
+            "sortType": {"values": ["trending", "random", "discovery"], "truncated": false}}}
+```
+
+`explore --category romance --sortType trending` generalizes; a list of 37 URLs
+does not.
+
+The true coverage caps are all opt-in, for a deliberately partial survey:
+`--max-pages`, `--max-depth`, `--max-per-template`, `--max-legs`. Each is
+disclosed in the output when it binds.
 
 Pacing is not a cap and stays on: `--max-rpm` (default 120) meters *requests*,
 the unit limiters actually count, and `--block-assets` (default on, Chromium

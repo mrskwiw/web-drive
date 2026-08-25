@@ -172,6 +172,9 @@ class SiteMap:
     collapsed_routes: int = 0
     _template_seen: Dict[str, int] = field(default_factory=dict)
     _collapsed: Dict[str, int] = field(default_factory=dict)
+    _variants: Dict[str, List[str]] = field(default_factory=dict)
+    _variants_collapsed: Dict[str, int] = field(default_factory=dict)
+    _params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -196,6 +199,9 @@ class SiteMap:
             "collapsed_routes": self.collapsed_routes,
             "_template_seen": dict(self._template_seen),
             "_collapsed": dict(self._collapsed),
+            "_variants": {k: list(v) for k, v in self._variants.items()},
+            "_variants_collapsed": dict(self._variants_collapsed),
+            "_params": dict(self._params),
             "routes": [r.to_dict() for r in self.routes],
             "skipped": list(self.skipped),
         }

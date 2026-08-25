@@ -135,11 +135,25 @@ def cli() -> None:
 )
 @click.option(
     "--max-probes",
-    default=None,
+    default=12,
     type=int,
-    help="Cap button probes per route. Unset by default. Probes are already "
-    "deduped per (route template, label), so a nav bar is clicked once per page "
-    "shape rather than once per page.",
+    help="Cap button probes per route. This is a WORK cap, not a coverage cap -- "
+    "it bounds effort per page, not what is reachable -- and unsetting it makes "
+    "the map SMALLER: unlimited, a 146-control page spends ~650 requests on "
+    "itself and a breadth-first walk never leaves depth 1 (measured: 13 routes "
+    "uncapped vs 20 at 8). 0 means no cap.",
+)
+@click.option(
+    "--max-query-variants",
+    default=3,
+    type=int,
+    help="How many distinct query strings to walk per path template. A faceted "
+    "browse page is ONE route with a parameter space: every filter chip mints a "
+    "URL, so the space is combinatorial and an uncapped crawl of one never "
+    "converges (isekaizero's /explore produced 37 variants and ate a 45-minute "
+    "budget). Variants beyond the sample are still COUNTED, and their parameter "
+    "names and values are recorded in `templates[].params` regardless. 0 means "
+    "no cap.",
 )
 @click.option(
     "--time-budget-s",
@@ -224,7 +238,8 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     max_rpm: int,
     block_assets: bool,
     max_per_template: int | None,
-    max_probes: int | None,
+    max_probes: int,
+    max_query_variants: int,
     time_budget_s: int,
     probe_buttons: bool,
     fill_forms: bool,
@@ -272,7 +287,8 @@ def map(  # noqa: A001 — the subcommand really is called `map`
                 max_retries=max_retries,
                 max_rpm=max_rpm,
                 max_per_template=max_per_template,
-                max_probes=max_probes,
+                max_probes=max_probes or None,
+                max_query_variants=max_query_variants or None,
                 probe_buttons_enabled=probe_buttons,
                 fill_forms_enabled=fill_forms,
                 resume=resume,
