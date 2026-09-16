@@ -57,6 +57,11 @@ class ActionType(str, Enum):
     SCROLL = "scroll"
     WAIT_FOR = "wait_for"
     SELECT = "select"
+    # Hand the browser to a human mid-flow, then carry on in the SAME context.
+    # For the walls a QA tool must not automate its way through — a bot challenge
+    # (Turnstile/reCAPTCHA), an MFA prompt, an SSO redirect, a 3-D Secure step.
+    # Flow-only and headed-only; see BrowserController.wait_for_human.
+    PAUSE = "pause"
 
 
 class Severity(str, Enum):

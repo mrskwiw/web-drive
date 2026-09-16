@@ -8,7 +8,9 @@ browser, perform one requested :class:`~engine.models.Action`, and capture a ful
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -560,7 +562,7 @@ class BrowserController:
         elif t is ActionType.CLICK:
             await self.page.click(_require(action.selector, "selector"))
         elif t is ActionType.FILL:
-            await self.page.fill(
+            await self._fill_verified(
                 _require(action.selector, "selector"), action.value or ""
             )
         elif t is ActionType.TYPE:
@@ -576,6 +578,13 @@ class BrowserController:
             await self.page.mouse.wheel(0, distance)
         elif t is ActionType.WAIT_FOR:
             await self.page.wait_for_selector(_require(action.selector, "selector"))
+        elif t is ActionType.PAUSE:
+            await self.wait_for_human(
+                message=action.text,
+                until_selector=action.selector,
+                until_url=action.url,
+                timeout_s=int(action.value) if action.value else 300,
+            )
         elif t is ActionType.SELECT:
             sel = _require(action.selector, "selector")
             option = action.value if action.value is not None else (action.text or "")
@@ -588,6 +597,92 @@ class BrowserController:
         else:  # pragma: no cover — enum is exhaustive
             raise ValueError(f"Unsupported action type: {t}")
         await self.page.wait_for_timeout(300)
+
+    async def _fill_verified(self, selector: str, value: str) -> None:
+        """``fill``, then prove the value actually landed — retrying as keystrokes.
+
+        Playwright's ``fill`` sets the value through the native property setter and
+        emits ONE synthetic ``input`` event. React Native Web (and some controlled
+        React inputs) bind their own handler and re-render from component state, so
+        the DOM value is reverted and the field ends up EMPTY — with no exception,
+        no console error, and a fully passing gate. Observed on isekaizero's persona
+        form, 2026-08-26; a green step that typed nothing is the worst kind of
+        failure this engine can produce, because it is invisible in the evidence.
+
+        ``type`` dispatches real per-character key events, which those handlers do
+        honour. We try the fast path first and fall back only when the read-back
+        disagrees, so ordinary inputs keep ``fill``'s speed and its ability to
+        replace existing text.
+        """
+        await self.page.fill(selector, value)
+        try:
+            landed = await self.page.input_value(selector, timeout=2000)
+        except Exception:  # noqa: BLE001 — not an <input>/<textarea>; nothing to verify
+            return
+        if landed == value:
+            return
+        # The value did not stick. Clear whatever partial state exists and type it.
+        await self.page.click(selector)
+        await self.page.keyboard.press("ControlOrMeta+a")
+        await self.page.keyboard.press("Delete")
+        await self.page.type(selector, value)
+
+    async def wait_for_human(
+        self,
+        message: Optional[str] = None,
+        until_selector: Optional[str] = None,
+        until_url: Optional[str] = None,
+        timeout_s: int = 300,
+        poll_ms: int = 500,
+    ) -> bool:
+        """Block until a human finishes something in the visible browser window.
+
+        The escape hatch for walls a QA tool must not pick: a bot challenge
+        (Turnstile/reCAPTCHA), MFA, an SSO redirect, 3-D Secure. SKILL.md's rule is
+        that defeating these is an arms race we stay out of — but a human clearing
+        one by hand, once, inside the flow's own context, is not defeating anything.
+        Every later step then runs with the resulting state already in place.
+
+        Raises if the browser is headless: you cannot solve a challenge you cannot
+        see, and silently waiting out the timeout would turn an unsatisfiable step
+        into a slow no-op that later steps build on. Returns whether the resume
+        condition was actually observed — with no condition given, waiting out the
+        clock is the honest answer and returns True.
+        """
+        if self._headless:
+            raise RuntimeError(
+                "A 'pause' step needs a browser the human can see — re-run this flow "
+                "with --no-headless. (Refusing to wait blindly in headless mode: the "
+                "challenge could never be solved and later steps would run on an "
+                "unmet precondition.)"
+            )
+        # stderr, not stdout: stdout carries the flow's JSON result.
+        print(
+            f"\n>>> PAUSED — {message or 'finish the step in the browser window.'}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if until_selector:
+            cond = f"until {until_selector!r} appears"
+        elif until_url:
+            cond = f"until the URL contains {until_url!r}"
+        else:
+            cond = "for the full window (no resume condition given)"
+        print(f">>> Waiting {cond}, up to {timeout_s}s.\n", file=sys.stderr, flush=True)
+
+        waited = 0
+        while waited < timeout_s * 1000:
+            if until_url and until_url in self.page.url:
+                return True
+            if until_selector:
+                try:
+                    if await self.is_present(until_selector):
+                        return True
+                except Exception:  # noqa: BLE001 — mid-navigation; retry next poll
+                    pass
+            await asyncio.sleep(poll_ms / 1000)
+            waited += poll_ms
+        return not (until_selector or until_url)
 
     async def settle(self, ms: int) -> None:
         """Extra idle wait after an action — for slow SPA transitions/XHR to land
