@@ -5,10 +5,11 @@ description: Turns a live web app into a command-line tool an agent can operate.
 
 # web-drive
 
-> **Status: Phase A skeleton.** The engine currently carries the copied
-> browser/flow/models core and the `map` subcommand. Verb inference (§Phase D),
-> verification (§E), extraction (§F) and driver generation (§G) are not built
-> yet — see `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
+> **Status: Phase B.** The engine carries the copied browser/flow/models core
+> plus `map` (route graph) and `read` (one page's declared surface). Navigation
+> + reconciliation (§Phase C), verb inference (§D), verification (§E),
+> extraction (§F) and driver generation (§G) are not built yet — see
+> `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
 
 ## Mission — make the app operable, not just understood
 
@@ -167,4 +168,22 @@ the unit limiters actually count, and `--block-assets` (default on, Chromium
 only) drops images and media — roughly a 75% request cut. Neither limits what
 gets mapped.
 
-*Phases B–H are not implemented yet.*
+### 1. Read a page's declared surface
+
+```bash
+python -m engine.cli read --url <URL> --output surface.json
+```
+
+Extracts what **one page claims** (spec §3's "claims" half, not yet checked
+against navigation — that is Phase C's `probe`): headings, aria landmarks
+(role + accessible name), non-form controls addressed role-first, and every
+form's field schema — `required`, `maxlength`, `minlength`, `pattern`,
+`<select>` options, aria-describedby — plus visible error (`role=alert`/
+`aria-live`) and empty-state copy. Pass `--session <bundle>` to read an
+authenticated page (same bundle format as `map`).
+
+This is a single-page read with no crawl and no navigation: point it at one
+route from a `sitemap.json` you already have. Nothing here is verified yet —
+`read` reports what the markup says, not what happens when you act on it.
+
+*Phases C–H are not implemented yet.*

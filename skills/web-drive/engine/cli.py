@@ -27,6 +27,7 @@ import click
 
 from .browser import BrowserController
 from .models import BrowserEngine
+from .read import read_surface
 from .sitemap import crawl
 
 _ENGINE_CHOICE = click.Choice([e.value for e in BrowserEngine])
@@ -319,6 +320,62 @@ def map(  # noqa: A001 — the subcommand really is called `map`
             err=True,
         )
     _emit(site.to_dict(), output)
+
+
+@cli.command()
+@click.option("--url", required=True, help="Page to read.")
+@click.option(
+    "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
+)
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session (same format as `map --session`) to read "
+    "an authenticated page.",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Override the user-agent (defaults to the one saved in --session).",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Also write the surface JSON here.",
+)
+def read(  # noqa: A001 — the subcommand really is called `read`
+    url: str,
+    engine: str,
+    headless: bool,
+    session: str | None,
+    user_agent: str | None,
+    output: str | None,
+) -> None:
+    """Extract ONE page's declared surface -> `surface.json`.
+
+    Controls, form schemas (incl. `required`/`maxlength`/`pattern`/`<select>`
+    options), headings, aria landmarks, and visible error / empty-state copy.
+
+    This is the READ half of spec §3 -- what the app *claims*. `probe`
+    (Phase C, not yet built) is the NAVIGATE half that checks these claims
+    against what actually happens; until then, everything here is unverified
+    by construction.
+    """
+
+    async def run():
+        controller = _controller(engine, headless, session, user_agent, False)
+        await controller.launch()
+        try:
+            await controller.navigate(url)
+            return await read_surface(controller)
+        finally:
+            await controller.close()
+
+    surface = asyncio.run(run())
+    _emit(surface.to_dict(), output)
 
 
 def _apply_totals(site, totals) -> None:

@@ -230,3 +230,142 @@ class SiteMap:
         site._template_seen = dict(data.get("_template_seen", {}))
         site._collapsed = dict(data.get("_collapsed", {}))
         return site
+
+
+# ---------------------------------------------------------------------------
+# `read` (Phase B) — one page's DECLARED surface, the "claims" half of spec §3.
+# `probe` (Phase C) is what checks these against what navigation proves; until
+# then everything here is unverified by construction.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SurfaceField:
+    """One form control as the markup declares it — including the validation
+    attributes spec §3 calls out by name (`required`, `maxlength`, `pattern`,
+    `<select>` options), which `map`'s lighter `forms[]` capture never recorded."""
+
+    selector: str
+    role: str
+    name: Optional[str] = None
+    label: str = ""
+    type: str = "text"
+    required: bool = False
+    placeholder: Optional[str] = None
+    maxlength: Optional[int] = None
+    minlength: Optional[int] = None
+    pattern: Optional[str] = None
+    options: List[str] = field(default_factory=list)  # <select> option labels
+    default_value: Optional[str] = None
+    aria_label: Optional[str] = None
+    aria_describedby: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "selector": self.selector,
+            "role": self.role,
+            "name": self.name,
+            "label": self.label,
+            "type": self.type,
+            "required": self.required,
+            "placeholder": self.placeholder,
+            "maxlength": self.maxlength,
+            "minlength": self.minlength,
+            "pattern": self.pattern,
+            "options": list(self.options),
+            "default_value": self.default_value,
+            "aria_label": self.aria_label,
+            "aria_describedby": self.aria_describedby,
+        }
+
+
+@dataclass
+class SurfaceForm:
+    selector: str
+    role_name: Optional[str] = None
+    fields: List[SurfaceField] = field(default_factory=list)
+    submit_selector: Optional[str] = None
+    submit_text: Optional[str] = None
+    # Same heuristic as `map`'s form capture (password-outside-login, or
+    # pay/delete/subscribe wording) — kept consistent so a form doesn't
+    # change classification depending on which command looked at it.
+    destructive: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "selector": self.selector,
+            "role_name": self.role_name,
+            "fields": [f.to_dict() for f in self.fields],
+            "submit_selector": self.submit_selector,
+            "submit_text": self.submit_text,
+            "destructive": self.destructive,
+        }
+
+
+@dataclass
+class SurfaceControl:
+    """A non-form interactive element, addressed role-first (spec §5:
+    'Locators are role + accessible-name first, CSS only as fallback')."""
+
+    selector: str
+    role: str
+    name: str
+    kind: str = "other"  # cta | nav | footer | other
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "selector": self.selector,
+            "role": self.role,
+            "name": self.name,
+            "kind": self.kind,
+        }
+
+
+@dataclass
+class Landmark:
+    role: str
+    name: Optional[str] = None
+    selector: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"role": self.role, "name": self.name, "selector": self.selector}
+
+
+@dataclass
+class Heading:
+    level: int
+    text: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"level": self.level, "text": self.text}
+
+
+@dataclass
+class PageSurface:
+    """One page's declared surface — `read`'s whole output."""
+
+    url: str
+    title: str
+    headings: List[Heading] = field(default_factory=list)
+    landmarks: List[Landmark] = field(default_factory=list)
+    controls: List[SurfaceControl] = field(default_factory=list)
+    forms: List[SurfaceForm] = field(default_factory=list)
+    # Visible role=alert / aria-live regions — what the app SAYS went wrong.
+    errors: List[str] = field(default_factory=list)
+    # "No results", "nothing here yet", etc. — what the app says when a list
+    # is empty, which `extract` (Phase F) needs to tell "empty" from "broken".
+    empty_states: List[str] = field(default_factory=list)
+    copy: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "url": self.url,
+            "title": self.title,
+            "headings": [h.to_dict() for h in self.headings],
+            "landmarks": [lm.to_dict() for lm in self.landmarks],
+            "controls": [c.to_dict() for c in self.controls],
+            "forms": [f.to_dict() for f in self.forms],
+            "errors": list(self.errors),
+            "empty_states": list(self.empty_states),
+            "copy": list(self.copy),
+        }
