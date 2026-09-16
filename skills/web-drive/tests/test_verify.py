@@ -114,6 +114,62 @@ def test_verify_passes_a_happy_path_capability(tmp_path):
     assert all(s["passed"] for s in result["steps"])
 
 
+def test_verify_saves_a_session_on_success_but_not_on_failure(tmp_path):
+    """`verify --save-session` is how a plain form login (no SSO/MFA, so the
+    human-only `login` command is unnecessary) gets persisted headlessly:
+    verify IS the login, and the resulting cookies get written out exactly
+    when the capability actually verified."""
+    steps = [
+        {"type": "fill", "selector": "#q", "value": "trees"},
+        {"type": "click", "selector": "#go"},
+    ]
+    steps_path = _write(tmp_path, "steps.json", steps)
+    ok_assert = _write(tmp_path, "assert_ok.json", {"content_contains": "Results for trees"})
+    bad_assert = _write(tmp_path, "assert_bad.json", {"content_contains": "nope"})
+    saved = tmp_path / "session.json"
+
+    with _server() as base:
+        res = _invoke(
+            [
+                "verify",
+                "--url",
+                base + "/search",
+                "--verb",
+                "site search",
+                "--steps",
+                steps_path,
+                "--assert",
+                ok_assert,
+                "--save-session",
+                str(saved),
+            ]
+        )
+        assert res.exit_code == 0, res.output
+        assert saved.exists()
+        bundle = json.loads(saved.read_text(encoding="utf-8"))
+        assert "storage_state" in bundle
+        assert bundle["user_agent"]  # read from the live page, never null
+
+        saved.unlink()
+        res2 = _invoke(
+            [
+                "verify",
+                "--url",
+                base + "/search",
+                "--verb",
+                "site search",
+                "--steps",
+                steps_path,
+                "--assert",
+                bad_assert,
+                "--save-session",
+                str(saved),
+            ]
+        )
+        assert res2.exit_code == 1, res2.output
+        assert not saved.exists()  # never written on an unverified run
+
+
 def test_verify_a_zero_step_capability_checks_the_current_page(tmp_path):
     """An extract-only read verb (spec §5) has no action of its own beyond
     the caller's initial navigation -- `steps: []` must still be verifiable

@@ -536,6 +536,17 @@ def probe(
     help="Override the user-agent (defaults to the one saved in --session).",
 )
 @click.option(
+    "--save-session",
+    "save_session_path",
+    type=click.Path(),
+    default=None,
+    help="On success, save the resulting auth session here (same format as "
+    "`map --session` / `login --save-session`) -- for a plain form login "
+    "with no SSO/MFA, `verify` IS the login: fill credentials, submit, then "
+    "persist what the site's own cookies/localStorage became. Not written "
+    "if the capability did not verify.",
+)
+@click.option(
     "--output",
     type=click.Path(),
     default=None,
@@ -552,6 +563,7 @@ def verify(
     headless: bool,
     session: str | None,
     user_agent: str | None,
+    save_session_path: str | None,
     output: str | None,
 ) -> None:
     """Execute a candidate capability's steps and report verified/withheld.
@@ -586,7 +598,10 @@ def verify(
         await controller.launch()
         try:
             await controller.navigate(url)
-            return await verify_capability(controller, verb, steps, final_assert)
+            outcome = await verify_capability(controller, verb, steps, final_assert)
+            if outcome.verified and save_session_path:
+                await controller.save_session(save_session_path, user_agent=user_agent)
+            return outcome
         finally:
             await controller.close()
 
