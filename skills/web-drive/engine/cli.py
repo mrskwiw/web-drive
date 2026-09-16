@@ -1,7 +1,9 @@
 """Engine CLI — the agent's hands.
 
-Phase A ships one subcommand: ``map`` (route-graph crawl). ``read``, ``probe``,
-``verify``, ``extract`` and ``generate`` follow in Phases B-G — see
+Ships ``map`` (route-graph crawl), ``read`` (one page's declared surface),
+``probe`` (check a claim against what navigation proves), ``verify`` (execute
+a candidate capability), and ``extract`` (container/field specs -> structured
+records). ``generate`` (Phase G, the driver/runtime) is not built yet — see
 ``docs/WEB_DRIVE_SPECIFICATION.md``.
 
 Session bundles are the SAME format web-qa's ``flow --save-session`` writes, so
@@ -27,6 +29,7 @@ from typing import Any, Dict
 import click
 
 from .browser import BrowserController
+from .extract import extract_records
 from .models import BrowserEngine
 from .probe import (
     is_probe_safe,
@@ -590,6 +593,73 @@ def verify(
     _emit(result.to_dict(), output)
     if not result.verified:
         sys.exit(1)
+
+
+@cli.command()
+@click.option("--url", required=True, help="Page to extract records from.")
+@click.option(
+    "--spec",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="JSON file: {\"container\": {...}, \"fields\": {...}} -- spec §5's "
+    "`extract` key. `container` finds each repeated item (`selector` or "
+    "`role`, e.g. {\"role\": \"listitem\"}); each entry in `fields` finds one "
+    "value inside it (`selector`/`role` + optional `attr`; no `attr` reads "
+    "text content).",
+)
+@click.option(
+    "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
+)
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session (same format as `map --session`).",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Override the user-agent (defaults to the one saved in --session).",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Also write the extracted records JSON here.",
+)
+def extract(
+    url: str,
+    spec_path: str,
+    engine: str,
+    headless: bool,
+    session: str | None,
+    user_agent: str | None,
+    output: str | None,
+) -> None:
+    """Pull structured records from a listing/detail page -> `records.json`.
+
+    One record per element `container` matches, each field read from inside
+    it per `fields`. Deterministic and literal: it does not infer a container
+    or guess field names -- write the spec from what `read` already told you
+    about the page's controls and landmarks.
+    """
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+
+    async def run():
+        controller = _controller(engine, headless, session, user_agent, False)
+        await controller.launch()
+        try:
+            await controller.navigate(url)
+            return await extract_records(
+                controller, spec.get("container", {}), spec.get("fields", {})
+            )
+        finally:
+            await controller.close()
+
+    records = asyncio.run(run())
+    _emit({"url": url, "records": records}, output)
 
 
 def _apply_totals(site, totals) -> None:

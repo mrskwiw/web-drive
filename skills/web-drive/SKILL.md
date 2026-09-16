@@ -5,11 +5,10 @@ description: Turns a live web app into a command-line tool an agent can operate.
 
 # web-drive
 
-> **Status: Phase E.** The engine ships `map`, `read`, `probe` and `verify`;
-> capability inference (§3 below) is agent procedure, not engine code yet —
-> there is no `generate` to automate it. Result extraction (§F) and driver
-> generation (§G) are not built yet — see `docs/WEB_DRIVE_SPECIFICATION.md`
-> and `TODO.md`.
+> **Status: Phase F.** The engine ships `map`, `read`, `probe`, `verify` and
+> `extract`; capability inference (§3 below) is agent procedure, not engine
+> code yet — there is no `generate` to automate it. Driver generation (§G) is
+> not built yet — see `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
 
 ## Mission — make the app operable, not just understood
 
@@ -344,4 +343,38 @@ instead. `verify` performs the real action every time it succeeds: a login
 verifies by actually signing in, a delete verifies by actually deleting. Pair
 a destructive verb's verification with a cleanup recipe where one exists.
 
-*Phases F–H are not implemented yet.*
+### 5. Extract structured records — the read-verb backbone
+
+```bash
+python -m engine.cli extract --url <URL> --spec extract-spec.json --output records.json
+```
+
+`extract-spec.json` is exactly spec §5's `extract` key:
+
+```jsonc
+{
+  "container": {"role": "listitem"},
+  "fields": {
+    "id":      {"attr": "data-id"},
+    "title":   {"role": "heading"},
+    "updated": {"selector": "time", "attr": "datetime"}
+  }
+}
+```
+
+`container` finds every repeated item on the page (`selector` wins if given,
+else `role` — resolved against an explicit `role=""` first, an implicit-role
+table second: `<li>`→listitem, `<article>`→article, `<tr>`→row, `<h1>`–`<h6>`→
+heading, and so on). Each `fields` entry finds ONE value inside that item the
+same way (`selector`/`role`, or neither for the container element itself),
+then reads an `attr` if given, else trimmed text content. Deterministic and
+literal on purpose — it does not infer a container or guess field names; that
+judgment already happened when you wrote the spec from what `read` told you
+about the page (§1's `controls`/`landmarks` are exactly where a sensible
+`container`/field selector comes from).
+
+This is the mechanism a `kind: "read"` capability's `--json` output runs on —
+`quiz list --json` (once Phase G exists) is `extract` against `/quizzes` with
+the spec above, wrapped in the generated driver's command tree.
+
+*Phases G–H are not implemented yet.*
