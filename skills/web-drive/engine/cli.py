@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -35,6 +36,7 @@ from .probe import (
 )
 from .read import read_surface
 from .sitemap import crawl
+from .verify import verify_capability
 
 _ENGINE_CHOICE = click.Choice([e.value for e in BrowserEngine])
 
@@ -481,6 +483,113 @@ def probe(
         {"url": url, "reconciliation": [f.to_dict() for f in findings]},
         output,
     )
+
+
+@cli.command()
+@click.option("--url", required=True, help="Entry URL to navigate to first.")
+@click.option("--verb", required=True, help="Capability name, e.g. 'quiz list'.")
+@click.option(
+    "--steps",
+    "steps_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="JSON file: a list of flow-style step objects (web-qa's schema, "
+    "spec D6). Secrets referenced as {\"env\": \"VAR\"} or ${VAR}.",
+)
+@click.option(
+    "--assert",
+    "assert_file",
+    type=click.Path(exists=True),
+    default=None,
+    help="JSON file: the capability-level assertion, checked against the "
+    "LAST step's evidence (same keys as a per-step `assert` -- see "
+    "engine.flow.evaluate_assertion). Omit to assert nothing beyond every "
+    "step's own gate and per-step assertion passing.",
+)
+@click.option(
+    "--destructive/--no-destructive",
+    default=False,
+    help="Declare this candidate destructive. Refuses to run (exit 4) unless "
+    "--yes is also passed -- spec §7: verifying a mutating/destructive verb "
+    "means really performing it, so it requires explicit confirmation.",
+)
+@click.option(
+    "--yes", is_flag=True, default=False, help="Confirm running a --destructive candidate."
+)
+@click.option(
+    "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
+)
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session (same format as `map --session`).",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Override the user-agent (defaults to the one saved in --session).",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Also write the verify-result JSON here.",
+)
+def verify(
+    url: str,
+    verb: str,
+    steps_path: str,
+    assert_file: str | None,
+    destructive: bool,
+    yes: bool,
+    engine: str,
+    headless: bool,
+    session: str | None,
+    user_agent: str | None,
+    output: str | None,
+) -> None:
+    """Execute a candidate capability's steps and report verified/withheld.
+
+    Runs every step in ONE persistent context (auth carries across steps),
+    checking each step's deterministic gate + per-step `assert`, then the
+    capability-level `--assert` against the last step's evidence. Halts at
+    the first failing step -- a capability whose steps stop partway is
+    unverified, with a reason naming exactly where, never "verified with
+    caveats" (spec §5's verify-or-withhold discipline).
+
+    Exit codes: 0 verified, 1 ran but did not verify, 4 refused (destructive
+    without --yes).
+    """
+    if destructive and not yes:
+        refused: dict[str, Any] = {
+            "verb": verb,
+            "verified": False,
+            "reason": "refused: destructive candidate requires --yes",
+            "steps": [],
+        }
+        _emit(refused, output)
+        sys.exit(4)
+
+    steps = json.loads(Path(steps_path).read_text(encoding="utf-8"))
+    final_assert = (
+        json.loads(Path(assert_file).read_text(encoding="utf-8")) if assert_file else None
+    )
+
+    async def run():
+        controller = _controller(engine, headless, session, user_agent, False)
+        await controller.launch()
+        try:
+            await controller.navigate(url)
+            return await verify_capability(controller, verb, steps, final_assert)
+        finally:
+            await controller.close()
+
+    result = asyncio.run(run())
+    _emit(result.to_dict(), output)
+    if not result.verified:
+        sys.exit(1)
 
 
 def _apply_totals(site, totals) -> None:

@@ -5,9 +5,9 @@ description: Turns a live web app into a command-line tool an agent can operate.
 
 # web-drive
 
-> **Status: Phase D.** The engine ships `map`, `read` and `probe`; capability
-> inference (§3 below) is agent procedure, not engine code yet — there is no
-> `generate` to automate it. Verification (§E), extraction (§F) and driver
+> **Status: Phase E.** The engine ships `map`, `read`, `probe` and `verify`;
+> capability inference (§3 below) is agent procedure, not engine code yet —
+> there is no `generate` to automate it. Result extraction (§F) and driver
 > generation (§G) are not built yet — see `docs/WEB_DRIVE_SPECIFICATION.md`
 > and `TODO.md`.
 
@@ -310,4 +310,38 @@ what `probe` actually observed succeeding, not from what seems plausible — the
 whole point of verify-or-withhold (Phase E) is that an assertion is only as
 good as the evidence that produced it.
 
-*Phases E–H are not implemented yet.*
+### 4. Verify a candidate — execute it, don't guess
+
+```bash
+python -m engine.cli verify --url <URL> --verb "quiz list" \
+    --steps steps.json --assert assert.json [--destructive --yes] \
+    --output verify-result.json
+```
+
+`steps.json` is a list of flow-style step objects — the same schema web-qa's
+`flow` already runs (spec D6), reused verbatim: `{"type": "click"/"fill"/
+"navigate"/..., "selector"?, "value"?, "text"?, "assert"?, "settle_ms"?,
+"await_response"?}`. Secrets are referenced, never inlined:
+`{"env": "QUIZSQUIRREL_PASSWORD"}` or `${QUIZSQUIRREL_PASSWORD}` inside a
+string. `assert.json` is the CAPABILITY-level assertion (the worked example's
+`{"content_contains": "..."}` or `{"url_contains": "..."}` etc. — same key
+vocabulary as a per-step `assert`), checked against the last step's evidence.
+
+This is the whole point of **verify-or-withhold** (spec §5): a candidate only
+becomes a runnable verb if this command actually ran it and it actually
+passed — every step's own deterministic gate (console errors, HTTP status,
+crash, error page, sane navigation) AND its own `assert`, then the
+capability-level `assert` at the end. It halts at the first failing step —
+report the `reason` and withhold the verb to `unverified[]`, never publish it
+"verified with caveats."
+
+**Destructive candidates require `--destructive --yes`, matching spec §7 —
+this is the permission gate, and there is no engine allowlist to bypass it.**
+`--destructive` alone refuses (exit 4) without running anything; add `--yes`
+only after the session's own permission prompt has approved it, and never
+against a target you don't own — ship it as `unverified` with the reason
+instead. `verify` performs the real action every time it succeeds: a login
+verifies by actually signing in, a delete verifies by actually deleting. Pair
+a destructive verb's verification with a cleanup recipe where one exists.
+
+*Phases F–H are not implemented yet.*
