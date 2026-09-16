@@ -5,11 +5,11 @@ description: Turns a live web app into a command-line tool an agent can operate.
 
 # web-drive
 
-> **Status: Phase B.** The engine carries the copied browser/flow/models core
-> plus `map` (route graph) and `read` (one page's declared surface). Navigation
-> + reconciliation (§Phase C), verb inference (§D), verification (§E),
-> extraction (§F) and driver generation (§G) are not built yet — see
-> `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
+> **Status: Phase C.** The engine carries the copied browser/flow/models core
+> plus `map` (route graph), `read` (one page's declared surface), and `probe`
+> (check a claim against what navigation proves). Verb inference (§D),
+> verification (§E), extraction (§F) and driver generation (§G) are not built
+> yet — see `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
 
 ## Mission — make the app operable, not just understood
 
@@ -186,4 +186,32 @@ This is a single-page read with no crawl and no navigation: point it at one
 route from a `sitemap.json` you already have. Nothing here is verified yet —
 `read` reports what the markup says, not what happens when you act on it.
 
-*Phases C–H are not implemented yet.*
+### 2. Check a claim against what navigation proves
+
+```bash
+python -m engine.cli probe --url <URL> [--check-preconditions] --output reconciliation.json
+```
+
+Reads the page fresh, then acts on what it found and records what actually
+happened — spec §3's "proves" half, run against `read`'s "claims" half:
+
+- clicks every non-form control that doesn't look mutating (same
+  `is_probe_safe` skip as `map --probe-buttons` — delete/save/publish/buy
+  wording is never clicked here either) and checks `advertised_absent` (the
+  click fails, or lands on a >=400 status) and `label_route_mismatch` (it
+  navigates somewhere sharing none of the label's significant words);
+- submits every non-destructive form once per optional field left blank, to
+  check `optional_but_required` (a new error appears that wasn't there
+  before);
+- with `--check-preconditions` (off by default — a second browser launch per
+  navigating control), re-opens a control's landing URL in a FRESH context
+  seeded with the same auth but none of the client-side state the click-through
+  accumulated, to check `undocumented_precondition`.
+
+Findings are facts (`reconciliation[]`), not verdicts — naming the verb a
+finding should change, or deciding it doesn't matter, is Phase D's job, not
+this command's. `probe` performs real clicks and real form submissions
+against whatever `--url` points at; point it at a target you own, the same
+way `map --probe-buttons`/`--fill-forms` do.
+
+*Phases D–H are not implemented yet.*

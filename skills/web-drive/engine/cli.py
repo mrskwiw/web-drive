@@ -27,6 +27,12 @@ import click
 
 from .browser import BrowserController
 from .models import BrowserEngine
+from .probe import (
+    is_probe_safe,
+    probe_control,
+    probe_form_requiredness,
+    probe_precondition,
+)
 from .read import read_surface
 from .sitemap import crawl
 
@@ -376,6 +382,105 @@ def read(  # noqa: A001 — the subcommand really is called `read`
 
     surface = asyncio.run(run())
     _emit(surface.to_dict(), output)
+
+
+@cli.command()
+@click.option("--url", required=True, help="Page whose declared surface to probe.")
+@click.option(
+    "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
+)
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session (same format as `map --session`).",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Override the user-agent (defaults to the one saved in --session).",
+)
+@click.option(
+    "--check-preconditions/--no-check-preconditions",
+    default=False,
+    help="Also re-navigate each navigating control's landing URL in a FRESH "
+    "context (same auth, none of the accumulated client-side state) to check "
+    "for UNDOCUMENTED_PRECONDITION. Off by default: a second browser launch "
+    "per navigating control.",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Also write the reconciliation JSON here.",
+)
+def probe(
+    url: str,
+    engine: str,
+    headless: bool,
+    session: str | None,
+    user_agent: str | None,
+    check_preconditions: bool,
+    output: str | None,
+) -> None:
+    """Navigate candidate transitions from a page's declared surface and
+    record what actually happened -> `reconciliation[]` (spec §3).
+
+    Reads the page fresh (same as `read`), then for each non-form control
+    that looks safe to click (spec's mutating-word skip, same as `map
+    --probe-buttons`) clicks it and checks ADVERTISED_ABSENT /
+    LABEL_ROUTE_MISMATCH; for each non-destructive form, submits once per
+    optional field left blank to check OPTIONAL_BUT_REQUIRED; with
+    `--check-preconditions`, also checks UNDOCUMENTED_PRECONDITION.
+
+    This is the NAVIGATE half of spec §3 -- what the app actually does, run
+    against `read`'s claims. Findings here are facts, not verdicts: naming
+    the verb a reconciliation changes is Phase D's job, not this command's.
+    """
+
+    async def run():
+        controller = _controller(engine, headless, session, user_agent, False)
+        await controller.launch()
+        try:
+            await controller.navigate(url)
+            # Captured BEFORE any control is clicked: a precondition check must
+            # withhold whatever client-side state this page's OWN probing (or an
+            # earlier control's) would otherwise leak into the "cold" context.
+            base_state = await controller.context.storage_state()
+            surface = await read_surface(controller)
+            findings = []
+            for c in surface.controls:
+                control = c.to_dict()
+                if not is_probe_safe(control.get("name", "")):
+                    continue
+                found = await probe_control(controller, url, control)
+                if found:
+                    findings.append(found)
+                if check_preconditions:
+                    pre = await probe_precondition(
+                        controller,
+                        url,
+                        control,
+                        base_state=base_state,
+                        browser_engine=BrowserEngine(engine),
+                        user_agent=user_agent,
+                    )
+                    if pre:
+                        findings.append(pre)
+            for f in surface.forms:
+                findings.extend(
+                    await probe_form_requiredness(controller, url, f.to_dict())
+                )
+            return findings
+        finally:
+            await controller.close()
+
+    findings = asyncio.run(run())
+    _emit(
+        {"url": url, "reconciliation": [f.to_dict() for f in findings]},
+        output,
+    )
 
 
 def _apply_totals(site, totals) -> None:

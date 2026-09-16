@@ -369,3 +369,38 @@ class PageSurface:
             "empty_states": list(self.empty_states),
             "copy": list(self.copy),
         }
+
+
+# ---------------------------------------------------------------------------
+# `probe` (Phase C) — the NAVIGATE half of spec §3: check a claim from `read`
+# or `map` against what actually happens. Deterministic detection only; the
+# agent (Phase D+) judges whether a finding matters and names the verb it
+# changes (spec §3's table, "Effect on the catalog" column).
+# ---------------------------------------------------------------------------
+
+
+class ReconciliationKind(str, Enum):
+    LABEL_ROUTE_MISMATCH = "label_route_mismatch"
+    OPTIONAL_BUT_REQUIRED = "optional_but_required"
+    ADVERTISED_ABSENT = "advertised_absent"
+    UNDOCUMENTED_PRECONDITION = "undocumented_precondition"
+
+
+@dataclass
+class Reconciliation:
+    """One disagreement between what the app claims and what navigation proved."""
+
+    kind: ReconciliationKind
+    subject: str  # the label/field/route this concerns
+    claimed: str  # what the markup/label said
+    observed: str  # what navigation proved
+    evidence: Optional[str] = None  # selector/URL/status detail
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind.value,
+            "subject": self.subject,
+            "claimed": self.claimed,
+            "observed": self.observed,
+            "evidence": self.evidence,
+        }
