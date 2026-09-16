@@ -457,10 +457,24 @@ class BrowserController:
         Call this while the context is still open (e.g. at the end of a login flow),
         NOT after ``close()``. The recorded user-agent matters: a fingerprint-bound
         token is only valid when replayed under the same user-agent.
+
+        When no UA was pinned we record the one the browser ACTUALLY used, read from
+        the live page — never ``null``. A null here used to be silently poisonous:
+        the replay would fall through to its own default UA, which for a headless
+        run is the ``HeadlessChrome`` string, so a session established in a headed
+        login was replayed under a different fingerprint (and one that announces
+        itself as a bot). That reads as an expired token, and the misdiagnosis costs
+        a re-login every time.
         """
         state = await self.context.storage_state()
+        ua = user_agent or self._user_agent
+        if not ua:
+            try:
+                ua = await self.page.evaluate("() => navigator.userAgent")
+            except Exception:  # noqa: BLE001 — page already gone; better null than crash
+                ua = None
         bundle = {
-            "user_agent": user_agent or self._user_agent,
+            "user_agent": ua,
             "storage_state": state,
         }
         target = Path(path)

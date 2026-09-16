@@ -157,3 +157,39 @@ def test_selector_condition_works_when_the_url_does_not_change(tmp_path):
             ]
         )
     assert r["detected_login"] is True
+
+
+def test_login_records_the_real_user_agent_when_none_is_pinned(tmp_path):
+    """An unpinned login used to save ``user_agent: null`` — silently poisonous.
+
+    The replay then falls through to its own default, which for a headless run is
+    the ``HeadlessChrome`` string: the session gets replayed under a DIFFERENT
+    device fingerprint than it was established under, and one that advertises
+    automation to exactly the bot checks the saved session existed to get past.
+    It surfaces as an expired token, so the instinct is to log in again — the one
+    action that cannot possibly help. This is the whole reason ``login`` exists,
+    so it is guarded here rather than left to the pinned-UA case above.
+    """
+    sess = tmp_path / "s4.json"
+    with _server() as base:
+        r = _login(
+            [
+                "--url",
+                base,
+                "--until-url",
+                "/dashboard",
+                "--timeout-s",
+                "20",
+                "--headless",
+                "--save-session",
+                str(sess),
+            ]
+        )
+    assert r["detected_login"] is True
+
+    bundle = json.loads(sess.read_text(encoding="utf-8"))
+    ua = bundle["user_agent"]
+    assert ua, "unpinned login saved a null user_agent"
+    assert "Mozilla" in ua, ua
+    # ...and the command reports what it saved, not the flag it was given.
+    assert r["user_agent"] == ua

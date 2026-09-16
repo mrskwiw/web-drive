@@ -546,12 +546,19 @@ def login(
             )
             saved = await controller.save_session(save_path, user_agent=user_agent)
             state = await controller.context.storage_state()
+            # Report the UA that was actually SAVED, not the flag we were handed:
+            # with no --user-agent the two differ, and the saved one is what every
+            # later --session replay must be pinned to. Reporting the flag would
+            # tell the operator "null" for a bundle that has a real UA in it.
+            saved_ua = json.loads(Path(saved).read_text(encoding="utf-8")).get(
+                "user_agent"
+            )
             return {
                 "saved": saved,
                 "detected_login": ok,
                 "final_url": controller.page.url,
                 "cookies": len(state.get("cookies", [])),
-                "user_agent": user_agent,
+                "user_agent": saved_ua,
             }
         finally:
             await controller.close()
