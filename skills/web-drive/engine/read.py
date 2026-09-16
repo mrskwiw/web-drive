@@ -193,11 +193,20 @@ _SURFACE_JS = r"""
       f.querySelector('input[type=image]') ||
       (nonSubmit.length ? nonSubmit[nonSubmit.length - 1] : null) ||
       f.querySelector('button');
-    const text = (f.innerText || '').toLowerCase();
+    // Scoped to the submit control's OWN text plus field labels -- NOT the
+    // whole form's innerText. A login form commonly nests a "Don't have an
+    // account? Sign up" cross-link inside the SAME <form> element; testing
+    // the full form text against `sign\s*up` misclassified an ordinary login
+    // as destructive (found live on quizsquirrel.com's /login, 2026-09-16).
+    // The form's own claim is what its submit button says it does.
+    const ownText = (
+      (submitEl ? (submitEl.innerText || submitEl.value || '') : '') +
+      ' ' + fields.map((x) => x.label).join(' ')
+    ).toLowerCase();
     const DESTRUCTIVE = /\b(pay|checkout|purchase|place order|delete|remove|cancel account|unsubscribe|sign\s*up|register|create account)\b/;
     const LOGIN = /\b(log\s*in|sign\s*in)\b/;
     const hasPassword = fields.some((x) => x.type === 'password');
-    const destructive = DESTRUCTIVE.test(text) || (hasPassword && !LOGIN.test(text));
+    const destructive = DESTRUCTIVE.test(ownText) || (hasPassword && !LOGIN.test(ownText));
     forms.push({
       selector: formSel,
       role_name: f.getAttribute('aria-label') || null,

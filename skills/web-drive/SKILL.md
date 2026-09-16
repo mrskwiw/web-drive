@@ -5,11 +5,11 @@ description: Turns a live web app into a command-line tool an agent can operate.
 
 # web-drive
 
-> **Status: Phase C.** The engine carries the copied browser/flow/models core
-> plus `map` (route graph), `read` (one page's declared surface), and `probe`
-> (check a claim against what navigation proves). Verb inference (§D),
-> verification (§E), extraction (§F) and driver generation (§G) are not built
-> yet — see `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
+> **Status: Phase D.** The engine ships `map`, `read` and `probe`; capability
+> inference (§3 below) is agent procedure, not engine code yet — there is no
+> `generate` to automate it. Verification (§E), extraction (§F) and driver
+> generation (§G) are not built yet — see `docs/WEB_DRIVE_SPECIFICATION.md`
+> and `TODO.md`.
 
 ## Mission — make the app operable, not just understood
 
@@ -214,4 +214,100 @@ this command's. `probe` performs real clicks and real form submissions
 against whatever `--url` points at; point it at a target you own, the same
 way `map --probe-buttons`/`--fill-forms` do.
 
-*Phases D–H are not implemented yet.*
+### 3. Infer capabilities from map + read + probe output
+
+There is no `generate` command yet (Phase G) — this section is **your**
+procedure for turning `sitemap.json` + `surface.json` + `reconciliation.json`
+into the `capabilities[]` entries spec §5 describes, by hand, until the engine
+can do it for you. Engine output is evidence; naming, classifying and writing
+assertions is judgment, and judgment is yours.
+
+**Noun-verb naming.** `<noun> <verb>`, both lowercase, matching the domain the
+*app* uses — read its own nav labels and headings before inventing terms. A
+route's primary form or its dominant read content usually names the noun
+(`/quizzes` → `quiz`); the action names the verb (`list`, `create`, `delete`,
+`update`). Prefer the site's own word for the noun over a generic one — `quiz`
+on a quiz app, not `item`.
+
+**Classification — `kind` and `destructive`.** A route with no mutating form
+and a GET-shaped purpose is `kind: "read"`. A route whose primary action is a
+form submit is `kind: "mutating"`. `destructive` starts from `read`'s own
+per-form heuristic (password-outside-login, or pay/delete/subscribe/sign-up
+wording) — but **that heuristic is scoped to the submit control's own text and
+field labels, not the whole form's `innerText`**, precisely because a form
+commonly nests an unrelated cross-link (a login form's "Don't have an account?
+Sign up") whose wording must not contaminate what the SUBMIT does. Confirmed
+live on quizsquirrel.com's `/login` (2026-09-16): the raw form text read
+`"Sign in ... Don't have an account? Sign up"`, which an earlier, whole-text
+version of this heuristic misclassified as destructive — an ordinary,
+idempotent login would have needed `--yes` for no reason, and `probe`'s
+requiredness check would have skipped testing it entirely (destructive forms
+are never submitted). Trust the submit button's own words over the page's.
+
+Worked example, from that same page (`read --url https://quizsquirrel.com/login`):
+
+```jsonc
+{
+  "verb": "auth login",
+  "summary": "Sign in with an email and password.",
+  "kind": "mutating",
+  "destructive": false,                 // submit says "Sign in" — idempotent auth
+  "params": [
+    {"name": "email",    "type": "string", "required": true},
+    {"name": "password", "type": "string", "required": true, "secret": true}
+  ]
+}
+```
+
+against the *same site's* `/register` (submit text "Create account", matching
+`register`/`create account` in the destructive vocabulary):
+
+```jsonc
+{
+  "verb": "auth register",
+  "kind": "mutating",
+  "destructive": true,                  // creates a new account — not idempotent
+  "confirm": true,
+  "params": [                            // real fields from /register's surface.json
+    {"name": "email",           "type": "string",  "required": true},
+    {"name": "username",        "type": "string",  "required": true},
+    {"name": "displayName",     "type": "string",  "required": true},
+    {"name": "password",        "type": "string",  "required": true, "secret": true},
+    {"name": "confirmPassword", "type": "string",  "required": true, "secret": true},
+    {"name": "birthYear",       "type": "number",  "required": true},
+    {"name": "acceptedTerms",   "type": "boolean", "required": true}
+  ]
+}
+```
+
+**Param derivation.** One `params[]` entry per form field from `read`'s
+`fields[]`: `name` from the field's `name`, `type` from a light mapping
+(`email`/`text`/`tel`/`url` → `string`, `number` → `number`, `checkbox` →
+`boolean`, a `<select>`'s `options` → an enum), `required` from the field's own
+`required` **unless** `probe`'s `reconciliation[]` contains an
+`optional_but_required` entry naming it — that finding **promotes** the param
+to `required: true` regardless of what the markup claimed (spec §3's
+"Effect on the catalog" column; this is the one place a `probe` finding directly
+edits a capability rather than just informing your read of it). A password
+field gets `"secret": true` so a generated driver never echoes or logs it.
+
+**Reading the other three `reconciliation[]` kinds into the catalog:**
+
+- `label_route_mismatch` — document the verb against the route it actually
+  lands on, not the label's wording (`quiz view` reachable via a nav item
+  labeled "My Stuff" is still named for the noun, not the label).
+- `advertised_absent` — withhold the verb. It goes in `unverified[]` with the
+  reason (`probe`'s `observed` string), never as a runnable capability.
+- `undocumented_precondition` — add a `preconditions[]` entry naming what
+  `probe` showed was actually required (e.g. `"onboarding_complete"`), so a
+  later session knows to satisfy it before calling the verb, instead of
+  discovering the failure at runtime.
+
+**Assertion authoring.** Reuse web-qa's assertion vocabulary verbatim (spec
+D6): `url_contains` for a route change, `content_contains` for text that must
+appear, `dom_contains` for a selector that must exist. Pick the assertion from
+what `probe` actually observed succeeding, not from what seems plausible — the
+whole point of verify-or-withhold (Phase E) is that an assertion is only as
+good as the evidence that produced it.
+
+*Phases E–H are not implemented yet.*

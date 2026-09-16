@@ -61,7 +61,24 @@ STATUS_PAGE = b"""<!doctype html><title>Quizzes</title>
 </main>
 </body>"""
 
-PAGES = {"/form": FORM_PAGE, "/content": CONTENT_PAGE, "/status": STATUS_PAGE}
+LOGIN_PAGE = b"""<!doctype html><title>Log in</title>
+<body>
+<form>
+  <label for="email">Email address</label>
+  <input id="email" name="email" type="email" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" required>
+  <button type="submit">Sign in</button>
+  <p>Don't have an account? <a href="/register">Sign up</a></p>
+</form>
+</body>"""
+
+PAGES = {
+    "/form": FORM_PAGE,
+    "/content": CONTENT_PAGE,
+    "/status": STATUS_PAGE,
+    "/login": LOGIN_PAGE,
+}
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -195,6 +212,20 @@ def test_read_extracts_error_and_empty_state_copy():
 
     assert any("Could not load your quizzes" in e for e in surface["errors"])
     assert any("No results found" in e for e in surface["empty_states"])
+
+
+def test_read_does_not_misclassify_a_login_form_as_destructive():
+    """A login form nesting a "Sign up" cross-link inside the SAME <form>
+    element (a common real-world pattern -- found live on quizsquirrel.com's
+    /login, 2026-09-16) must not be flagged destructive: the classifier's
+    claim is about what the SUBMIT does, and the submit says "Sign in"."""
+    with _server() as base:
+        surface = _read(base + "/login")
+
+    assert len(surface["forms"]) == 1
+    login_form = surface["forms"][0]
+    assert login_form["submit_text"] == "Sign in"
+    assert login_form["destructive"] is False
 
 
 def test_read_writes_output_file(tmp_path):
