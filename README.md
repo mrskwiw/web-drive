@@ -21,9 +21,9 @@ Third of three siblings — same instrument, different question:
 | [`web-replicate`](https://github.com/mrskwiw/web-replicate) | How do I rebuild it? |
 | **`web-drive`** | **How do I operate it?** |
 
-## Status — early
+## Status — v1 build complete
 
-**v0.1.0, Phase A.** The engine carries the browser/flow core and the `map` subcommand (route-graph crawl). Verb inference, verification, result extraction and driver generation are specified but not built. The generated-CLI examples above are the target, not yet the behaviour.
+**v0.15.0.** All eight build phases (A–H) are shipped: `map`, `read`, `probe`, `verify`, `extract` and `generate` all work end to end, including a generated driver's `_engine/` running standalone with no web-drive install. Capability *inference* — turning `map`/`read`/`probe` output into a `site.json` catalog — is still an agent procedure (`SKILL.md` §3), not an automated step; `generate` renders a driver from a catalog you assembled, it does not write the catalog for you.
 
 ## Install
 
@@ -50,18 +50,25 @@ python -m playwright install chromium
 
 Run from `skills/web-drive/` as a module (`python -m engine.cli …`):
 
-| Command | Status | Purpose |
-|---|---|---|
-| `map` | ✅ | Same-origin route-graph BFS → `sitemap.json`: final URL after redirects, status, depth, how it was reached, observed auth state |
-| `read` | planned | One page's declared surface: controls, form schemas, copy, aria |
-| `probe` | planned | Navigate a candidate transition; feeds reconciliation |
-| `verify` | planned | Execute every candidate action; demote failures to `unverified` |
-| `extract` | planned | Structured records from listing/detail pages |
-| `generate` | planned | Render `drivers/<slug>/` — shim, catalog, manual |
+| Command | Purpose |
+|---|---|
+| `map` | Same-origin route-graph BFS → `sitemap.json`: final URL after redirects, status, depth, how it was reached, observed auth state |
+| `read` | One page's declared surface → `surface.json`: controls, form schemas (validation attrs, `<select>` options), headings, aria landmarks, error/empty-state copy |
+| `probe` | Click a candidate control / submit a form and check the claim against what happened → `reconciliation.json` (all four kinds: `label_route_mismatch`, `optional_but_required`, `advertised_absent`, `undocumented_precondition`) |
+| `verify` | Execute a candidate capability's steps in one persistent context; verify-or-withhold with a reason |
+| `extract` | Container/field spec → structured records from a listing/detail page |
+| `generate` | Render `drivers/<slug>/` from a `site.json` catalog — shim, manual, self-contained runtime |
+| `login` | Open a real browser for a human to clear a wall a script can't (SSO/MFA/passkeys), then save the session |
 
-`map` accepts `--session <bundle>` to crawl authenticated routes. Session bundles use the **same format as `web-qa`'s `flow --save-session`**, so a session established by either skill is replayable by the other — authenticating is the expensive, rate-limited step and is worth sharing.
+`map`/`read`/`probe`/`verify`/`extract` all accept `--session <bundle>` for authenticated pages. Session bundles use the **same format as `web-qa`'s `flow --save-session`**, so a session established by either skill is replayable by the other — authenticating is the expensive, rate-limited step and is worth sharing.
 
 Two habits inherited deliberately: a crawl that hits `--max-pages` sets `capped` in its output, because a truncated map that reads as complete is how a generated driver silently omits half a site; and a crawl run *with* a session marks routes `auth: unknown` rather than `public`, because with a session every route authenticates and `public` would be a guess dressed as an observation.
+
+## A generated driver
+
+`generate --catalog site.json --out drivers/<slug>` writes a standalone directory: `site.json`, a `SITEGUIDE.md` manual, a POSIX shim and a `.cmd` wrapper for Windows, and a self-contained `_engine/` — copied byte-identical, so the directory runs with no web-drive install. Every verb accepts `--json`, `--yes` (required for a destructive verb), `--dry-run`, `--session`, `--timeout`, plus built-ins `capabilities`, `doctor` (fingerprint drift check), and `manual`.
+
+Exit codes: `0` verified · `1` ran but the expected outcome didn't happen · `2` precondition failed (not authenticated) · `3` drift (a locator wasn't found, or `doctor` sees a fingerprint mismatch) · `4` refused (destructive without `--yes`).
 
 ## Safety
 
@@ -69,7 +76,7 @@ Destructive candidates are classified by the agent, not by an engine allowlist. 
 
 ## Design
 
-Two halves with a JSON seam, like its siblings: a deterministic Python **engine** (the hands — crawls, drives, renders; no AI, names nothing) and the **Claude Code agent** running `SKILL.md` (the reasoning — names capabilities, derives parameters, classifies risk, decides what success means). The seam is `site.json`, the capability catalog.
+Two halves with a JSON seam, like its siblings: a deterministic Python **engine** (the hands — crawls, drives, renders; no AI, names nothing) and the **Claude Code agent** running `SKILL.md` (the reasoning — names capabilities, derives parameters, classifies risk, decides what success means). The seam is `site.json`, the capability catalog, guarded by a schema-freeze test.
 
 ## Layout
 
