@@ -114,6 +114,34 @@ def test_verify_passes_a_happy_path_capability(tmp_path):
     assert all(s["passed"] for s in result["steps"])
 
 
+def test_verify_a_zero_step_capability_checks_the_current_page(tmp_path):
+    """An extract-only read verb (spec §5) has no action of its own beyond
+    the caller's initial navigation -- `steps: []` must still be verifiable
+    against the current page, not unconditionally unverified."""
+    steps_path = _write(tmp_path, "steps.json", [])
+    assert_path = _write(tmp_path, "assert.json", {"content_contains": "Search"})
+
+    with _server() as base:
+        res = _invoke(
+            [
+                "verify",
+                "--url",
+                base + "/search",
+                "--verb",
+                "site status",
+                "--steps",
+                steps_path,
+                "--assert",
+                assert_path,
+            ]
+        )
+
+    assert res.exit_code == 0, res.output
+    result = json.loads(res.output)
+    assert result["verified"] is True
+    assert result["steps"] == []
+
+
 def test_verify_fails_and_reports_which_assertion_did_not_hold(tmp_path):
     steps = [
         {"type": "fill", "selector": "#q", "value": "trees"},

@@ -30,6 +30,7 @@ import click
 
 from .browser import BrowserController
 from .extract import extract_records
+from .generate import write_driver
 from .models import BrowserEngine
 from .probe import (
     is_probe_safe,
@@ -660,6 +661,44 @@ def extract(
 
     records = asyncio.run(run())
     _emit({"url": url, "records": records}, output)
+
+
+@cli.command()
+@click.option(
+    "--catalog",
+    "catalog_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="site.json to generate a driver from (spec §5's schema).",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    type=click.Path(),
+    default=None,
+    help="Output directory. Default: repo-root drivers/<slug> (../../../drivers "
+    "from a skill dir), alongside reports/ and blueprints/.",
+)
+def generate(catalog_path: str, out_dir: str | None) -> None:
+    """Render `drivers/<slug>/` -- shim, catalog, manual, and a self-contained
+    `_engine/` (copied byte-identical, spec D2) -- from a capability catalog.
+
+    The result is standalone: a cold shell given only `drivers/<slug>/` can
+    run every capability without the web-drive skill installed (spec §12).
+    """
+    catalog = json.loads(Path(catalog_path).read_text(encoding="utf-8"))
+    slug = catalog["site"]["slug"]
+    target = Path(out_dir) if out_dir else Path(__file__).resolve().parents[4] / "drivers" / slug
+    write_driver(catalog, target, source_engine_dir=Path(__file__).resolve().parent)
+    _emit(
+        {
+            "generated": str(target),
+            "slug": slug,
+            "capabilities": len(catalog.get("capabilities", [])),
+            "unverified": len(catalog.get("unverified", [])),
+        },
+        None,
+    )
 
 
 def _apply_totals(site, totals) -> None:

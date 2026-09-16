@@ -22,6 +22,7 @@ from .browser import BrowserController
 from .evidence import EvidenceBundler
 from .flow import MissingSecretError, build_action, evaluate_assertion, fail_reason
 from .gate import DeterministicGate
+from .models import Action, ActionType
 
 
 @dataclass
@@ -80,6 +81,20 @@ async def verify_capability(
     gate_eval = DeterministicGate()
     results: List[StepResult] = []
     last_bundle = None
+
+    if not steps:
+        # A read verb that does nothing beyond the caller's initial navigation
+        # (spec §5's `extract`-only capabilities) has no action to build a real
+        # EvidenceBundle from -- synthesize one from the CURRENT page, with
+        # before == after, so `final_assert` still has something to check
+        # against. Verified trivially when no assertion was given at all.
+        state = await controller.capture_state()
+        bundle = bundler.build(Action(type=ActionType.NAVIGATE, url=state.url), state, state)
+        final = evaluate_assertion(bundle, final_assert)
+        if not final.passed:
+            failed = [c.name for c in final.checks if not c.passed]
+            return VerifyResult(verb, False, f"final assertion failed: {', '.join(failed)}", [])
+        return VerifyResult(verb, True, None, [])
 
     for step in steps:
         label = step.get("label") or step.get("type", "step")

@@ -5,10 +5,11 @@ description: Turns a live web app into a command-line tool an agent can operate.
 
 # web-drive
 
-> **Status: Phase F.** The engine ships `map`, `read`, `probe`, `verify` and
-> `extract`; capability inference (§3 below) is agent procedure, not engine
-> code yet — there is no `generate` to automate it. Driver generation (§G) is
-> not built yet — see `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
+> **Status: Phase G.** The engine ships `map`, `read`, `probe`, `verify`,
+> `extract` and `generate`. Capability inference (§3 below) is still agent
+> procedure — `generate` renders a driver FROM a catalog you assembled by
+> hand per §3, it does not infer one. Only Phase H (tests/freeze/ship) is
+> left — see `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
 
 ## Mission — make the app operable, not just understood
 
@@ -374,7 +375,51 @@ about the page (§1's `controls`/`landmarks` are exactly where a sensible
 `container`/field selector comes from).
 
 This is the mechanism a `kind: "read"` capability's `--json` output runs on —
-`quiz list --json` (once Phase G exists) is `extract` against `/quizzes` with
-the spec above, wrapped in the generated driver's command tree.
+`quiz list --json` is `extract` against `/quizzes` with the spec above,
+wrapped in the generated driver's command tree (§6 below).
 
-*Phases G–H are not implemented yet.*
+### 6. Generate the driver
+
+```bash
+python -m engine.cli generate --catalog site.json --out ../../../drivers/<slug>
+```
+
+`site.json` is the catalog you assembled per §3 — spec §5's schema exactly:
+`site`, `auth`, `routes`, `capabilities[]` (each with `steps`/`assert`, and
+`extract` for read verbs), `unverified[]`, `reconciliation[]`. `generate`
+does not infer, rank or verify anything; it only renders. Writes
+`drivers/<slug>/`:
+
+- `site.json` — the catalog, verbatim.
+- `SITEGUIDE.md` — a human-facing manual: every capability with its params
+  table, destructive verbs flagged, and `unverified[]` entries listed with
+  their withholding reason (so a human sees *why* a verb is missing, not just
+  its absence).
+- `<slug>` (POSIX shim) and `<slug>.cmd` (Windows wrapper) — both load the
+  SAME `_engine/runtime.py`.
+- `_engine/` — `runtime.py` and its dependency closure (`browser`, `models`,
+  `accessibility`, `evidence`, `gate`, `flow`, `verify`, `extract`) copied
+  BYTE-IDENTICAL from this skill's own engine. This is what makes
+  `drivers/<slug>/` standalone: **a cold shell with only that directory,
+  no web-drive skill installed, can run every capability** (spec §12).
+
+The generated driver's command tree is `<slug> <noun> <verb-part> [flags]`
+(a capability's `verb` "quiz list" becomes `quiz list`, a `noun` group with
+a `list` command inside it), plus built-ins `capabilities` (machine-readable
+catalog), `doctor` (re-check the site's title against the stored
+`fingerprint`; exit 3 on drift, never auto-regenerates — report, don't act),
+and `manual` (prints `SITEGUIDE.md`). Every verb command accepts `--json`,
+`--yes` (required for a `destructive: true` verb — refuses with exit 4
+otherwise, spec §7's permission gate, no engine allowlist), `--dry-run`
+(prints the steps without touching the browser), `--session`, and
+`--timeout`. Exit codes: 0 verified, 1 ran-but-not-verified, 2 precondition
+failed (no `--session` where a capability needs `auth`), 3 drift (a step's
+own locator wasn't found — this is how a redeployed site's selector-rot
+becomes visible instead of a confusing assertion failure), 4 refused.
+
+CLI params substitute into a step's `${NAME}` references the same way a
+step's `{"env": "VAR"}` secrets already do (`flow.resolve_str`, reused
+verbatim) — write a capability's `steps` with `${title}` etc. and the
+generated `quiz create --title "Trees"` fills it in at runtime.
+
+*Phase H (tests, freeze, ship) is not implemented yet.*
