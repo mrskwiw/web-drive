@@ -53,6 +53,24 @@ class RouteNode:
     # map you can actually walk: every route with its addressable controls.
     controls: List[Dict[str, Any]] = field(default_factory=list)
     forms: List[Dict[str, Any]] = field(default_factory=list)
+    # Buttons that changed the page's OWN content without changing the URL --
+    # invisible to every other check in this engine, which all key off URL
+    # equality (`probe_buttons`'s own `outcome`, and probe.py's `probe_control`/
+    # `probe_precondition`, treat "no navigation" as "nothing happened"). A
+    # same-URL wizard step is exactly this case: content-jumpstart.com's
+    # Project Wizard advances through Client -> Research -> Templates -> ...
+    # entirely on `/dashboard/wizard`, so a fully exhaustive, zero-throttled
+    # `map --probe-buttons` run reported nothing for it -- not partial
+    # coverage, no signal at all. This field exists so a click that DID
+    # something is at least visible as a lead, even though naming what it does
+    # stays the agent's job (spec's engine/agent split).
+    state_changing_controls: List[str] = field(default_factory=list)
+    # Buttons whose click failed because Playwright's own actionability check
+    # found the element present but not enabled -- the disabled-button shape of
+    # a precondition-gated control (e.g. a wizard "Continue" button before its
+    # combobox is filled), reported distinctly from a click that simply throws
+    # for some other reason.
+    gated_controls: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +87,8 @@ class RouteNode:
             "throttled": self.throttled,
             "controls": list(self.controls),
             "forms": list(self.forms),
+            "state_changing_controls": list(self.state_changing_controls),
+            "gated_controls": list(self.gated_controls),
         }
 
     @classmethod
@@ -88,6 +108,8 @@ class RouteNode:
             throttled=data.get("throttled", False),
             controls=list(data.get("controls", [])),
             forms=list(data.get("forms", [])),
+            state_changing_controls=list(data.get("state_changing_controls", [])),
+            gated_controls=list(data.get("gated_controls", [])),
         )
 
 

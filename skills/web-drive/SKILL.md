@@ -148,6 +148,25 @@ page-specific control instead. A label whose outcome differs between templates
 is never cached and is always re-probed, so this never costs coverage; the
 output's `probe_cache_hits` field says how many clicks this run actually skipped.
 
+**A same-URL multi-step flow (a wizard) needs a manual look — `map` only leaves
+you a lead, on purpose.** Every check in this engine keys off URL equality, so a
+button that advances a flow WITHOUT changing the URL (content-jumpstart.com's
+Project Wizard advances Client → Research → Templates → … entirely on
+`/dashboard/wizard`) used to be completely invisible — indistinguishable from a
+dead toggle, in every part of the crawl. Each route in `sitemap.json` now also
+carries `state_changing_controls` (a button whose click left the URL unchanged
+but altered the page's own content — read this as "there's a flow here, go look
+by hand") and `gated_controls` (a button whose click failed because Playwright
+found it present but disabled — read this as "likely gated behind page state
+this isolated probe never provided, e.g. an empty combobox"). Neither list is
+auto-followed: `map` never fills a combobox or retries a gated control to get
+past it, because that would mean guessing valid business data and chaining
+through a *mutating* flow with no agent judgment in the loop — content-jumpstart's
+own `wizard advance` capability creates a real project as a side effect. Treat
+both lists as candidates for the SAME manual-inspection-then-`verify` procedure
+this section already describes for any other capability, not as a phase to
+automate further.
+
 **Two caps stay on, and neither limits reachability.** They bound *effort per
 unit of coverage*, which is the opposite thing — removing them shrinks the map:
 

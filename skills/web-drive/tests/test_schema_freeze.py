@@ -54,6 +54,11 @@ def test_sitemap_schema_is_frozen():
 
 
 def test_route_node_schema_is_frozen():
+    """v1.6: added `state_changing_controls`/`gated_controls` (WEB_DRIVE_SPECIFICATION.md
+    §4.1) -- a same-URL SPA state change (a wizard step) or a disabled-button click
+    used to be silently indistinguishable from a true no-op toggle; both are now
+    named so a multi-step flow leaves a lead in `map`'s own output instead of
+    vanishing entirely."""
     node = RouteNode(path="/a", url="https://e.com/a", final_url="https://e.com/a", status=200)
     assert set(node.to_dict().keys()) == {
         "path",
@@ -69,6 +74,8 @@ def test_route_node_schema_is_frozen():
         "throttled",
         "controls",
         "forms",
+        "state_changing_controls",
+        "gated_controls",
     }
 
 

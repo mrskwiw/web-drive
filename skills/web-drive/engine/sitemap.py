@@ -210,6 +210,29 @@ def is_probe_safe(text: str) -> bool:
     return bool(t) and not any(w in t for w in _MUTATING_WORDS)
 
 
+async def _content_fingerprint(controller: BrowserController) -> str:
+    """Cheap same-URL change detector for ``probe_buttons``.
+
+    URL equality is not "nothing happened" on a single-page wizard/flow -- a
+    step transition renders new content at the SAME address, which every
+    URL-keyed check in this engine otherwise misses entirely. A full
+    ``capture_state()`` is too costly to pay per button click (it is already
+    the dominant cost of a button-heavy crawl, see ``probe_buttons``'s own
+    docstring); title plus a short slice of visible text is enough to tell
+    "this click changed the page" from "this click did nothing," which is the
+    only distinction this needs to make. False negatives (a change this slice
+    misses) just mean one more candidate the agent doesn't get a lead on --
+    the same failure mode the rest of this module already accepts elsewhere.
+    """
+    try:
+        return await controller.page.evaluate(
+            "() => document.title + '|' + "
+            "((document.body && document.body.innerText) || '').slice(0, 500)"
+        )
+    except Exception:  # noqa: BLE001 — a page mid-navigation has no stable content to read
+        return ""
+
+
 def _record_cross_template_outcome(
     label: str,
     outcome: str,
@@ -252,7 +275,7 @@ async def probe_buttons(
     cross_template_seen: Optional[Dict[str, str]] = None,
     cross_template_confirmed: Optional[Dict[str, str]] = None,
     cross_template_varies: Optional[Set[str]] = None,
-) -> Tuple[List[Tuple[str, str]], int]:
+) -> Tuple[List[Tuple[str, str]], int, List[str], List[str]]:
     """Click navigation-looking buttons to find routes no <a href> exposes.
 
     SPAs route through onClick handlers constantly -- an interstitial whose only
@@ -279,8 +302,24 @@ async def probe_buttons(
     DIFFERS between two scopes is marked permanently untrustworthy and always
     re-probed per template, same as today -- this cache only ever skips a click
     it has empirically verified is redundant, never guesses.
+
+    Two more outcomes are tracked besides "found a route" (see catalog.py's
+    `RouteNode.state_changing_controls` / `.gated_controls`): a click that left
+    the URL unchanged but altered the page's own content (a same-URL wizard/flow
+    step -- content-jumpstart.com's Project Wizard is exactly this shape), and a
+    click that failed specifically because the element was present but not
+    enabled (the disabled-button shape of a precondition-gated control). Neither
+    was visible in the output AT ALL before -- both were silently indistinguishable
+    from a true no-op toggle, which is how a fully exhaustive, zero-throttled
+    crawl of content-jumpstart.com never surfaced its own multi-step wizard.
+    Detection only: this never fills a combobox or retries a gated control to
+    get past it -- that would mean the crawler starts guessing valid business
+    data and chaining through mutating flows on its own, which is exactly the
+    line "probes are safe by default" (CLAUDE.md) exists to hold.
     """
     found: List[Tuple[str, str]] = []
+    state_changes: List[str] = []
+    gated_controls: List[str] = []
     cache_hits = 0
     budget = max_probes
     for ctl in controls:
@@ -321,18 +360,26 @@ async def probe_buttons(
                 await pacer()
             await controller.navigate(url)
             before = controller.page.url
+            before_content = await _content_fingerprint(controller)
             await controller.perform(
                 Action(type=ActionType.CLICK, selector=ctl["selector"])
             )
             await controller.settle(900)
             after = controller.page.url
+            same_url = normalize(after) == normalize(before)
             outcome = (
-                normalize(after)
-                if (normalize(after) != normalize(before) and same_origin(after, origin))
-                else ""
+                normalize(after) if (not same_url and same_origin(after, origin)) else ""
             )
             if outcome:
                 found.append((outcome, f"button:{ctl.get('text','')[:40]}"))
+            elif same_url:
+                # No navigation is NOT "nothing happened" on a single-page flow --
+                # a wizard step advances the SAME url. Without this check that
+                # click is indistinguishable from a true no-op toggle and vanishes
+                # from the map entirely (see this function's docstring).
+                after_content = await _content_fingerprint(controller)
+                if after_content != before_content:
+                    state_changes.append(f"button:{ctl.get('text','')[:40]}")
             if (
                 cross_template_seen is not None
                 and cross_template_confirmed is not None
@@ -342,9 +389,17 @@ async def probe_buttons(
                     label, outcome, cross_template_seen, cross_template_confirmed,
                     cross_template_varies,
                 )
-        except Exception:  # noqa: BLE001 — a button that will not click is not a route
+        except Exception as exc:  # noqa: BLE001 — a button that will not click is not a route
+            if "not enabled" in str(exc):
+                # Playwright's own actionability wait found the element present
+                # but disabled -- the shape of a control gated behind state this
+                # isolated, freshly-reloaded probe never provided (a wizard
+                # "Continue" before its combobox is filled). Recorded distinctly
+                # from every other click failure, which stays silent here exactly
+                # as before: naming what a control is gated ON is the agent's job.
+                gated_controls.append(f"button:{ctl.get('text','')[:40]}")
             continue
-    return found, cache_hits
+    return found, cache_hits, state_changes, gated_controls
 
 
 # Values safe to type into a discovery form. Nothing here should read as real
@@ -737,7 +792,7 @@ async def crawl(
 
         discovered: List[Tuple[str, str]] = []
         if probe_buttons_enabled and node.controls:
-            button_finds, cache_hits = await probe_buttons(
+            button_finds, cache_hits, state_changes, gated_controls = await probe_buttons(
                 controller,
                 node.final_url,
                 node.controls,
@@ -751,6 +806,8 @@ async def crawl(
                 cross_template_varies=cross_template_varies,
             )
             site.probe_cache_hits += cache_hits
+            node.state_changing_controls = state_changes
+            node.gated_controls = gated_controls
             for tgt, via in button_finds:
                 if tgt not in seen:
                     discovered.append((tgt, via))

@@ -642,6 +642,79 @@ def test_button_probing_finds_routes_no_link_exposes_and_skips_mutating_labels()
     )
 
 
+_WIZARD_INDEX = (
+    b"<!doctype html><title>Wizard</title><h1>Wizard</h1>"
+    b"<button onclick=\"document.getElementById('out').textContent='Research Tools'\">"
+    b"Continue</button>"
+    b"<div id='out'></div>"
+    b"<button disabled>Locked Step</button>"
+)
+
+
+class _WizardHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = _WIZARD_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _wizard_server():
+    srv = _Server(("127.0.0.1", 0), _WizardHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_same_url_content_change_is_recorded_as_a_state_change_not_dropped():
+    """A single-page wizard/flow advances WITHOUT changing the URL -- the exact
+    shape that let content-jumpstart.com's Project Wizard go completely
+    unmapped by an exhaustive, zero-throttled `map --probe-buttons` run: a
+    click that changes the page's own content produced the same `outcome: ""`
+    as a true no-op toggle, so it left no trace anywhere in the sitemap. This
+    click must now be reported as a state-changing control, distinct from a
+    toggle that changes nothing.
+    """
+    with _wizard_server() as base:
+        site = _map(base, "--probe-buttons", "--delay-ms", "0", "--max-rpm", "0")
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    assert "button:Continue" in root["state_changing_controls"], (
+        f"in-page content change went undetected: {root['state_changing_controls']}"
+    )
+    # It changed content, not the URL -- must never be reported as a discovered
+    # route (there is nowhere else for it to navigate to on this fixture).
+    assert site["route_count"] == 1
+
+
+def test_a_disabled_button_is_reported_as_gated_not_silently_skipped():
+    """The disabled-button shape of a precondition-gated control (a wizard
+    'Continue' before its combobox is filled) used to vanish into a bare
+    `except Exception: continue` -- indistinguishable from every other click
+    failure, and invisible to `map`'s own output entirely. It must now be
+    named as gated so an agent has a lead to follow up on by hand.
+    """
+    with _wizard_server() as base:
+        site = _map(base, "--probe-buttons", "--delay-ms", "0", "--max-rpm", "0")
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    assert "button:Locked Step" in root["gated_controls"], (
+        f"disabled button was not flagged as gated: {root['gated_controls']}"
+    )
+
+
 # -- cross-template button-outcome caching (request-count optimization) ------
 
 _SECTION_PATHS = ("/s1", "/s2", "/s3", "/s4")
