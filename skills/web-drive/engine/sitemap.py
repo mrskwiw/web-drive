@@ -365,6 +365,7 @@ async def probe_forms(
     origin: str,
     probed: Set[str],
     pacer: Optional[Callable[[], Awaitable[None]]] = None,
+    scope: str = "",
 ) -> List[Tuple[str, str]]:
     """Fill and submit non-destructive forms to reach what lies behind them.
 
@@ -376,6 +377,17 @@ async def probe_forms(
     password field is skipped (that is a login, and guessing at one is both
     useless and hostile); and values are obviously synthetic so anything that
     does persist is identifiable as a probe.
+
+    Dedup by ``(route template, submit-selector, field-count)`` rather than by
+    signature alone — the same asymmetry `probe_buttons` had before its
+    per-template tier was added (BUGS.md/plan 2026-09-16, WD-P1): a form that
+    repeats identically across N instances of one template (a per-category
+    "Filter by tag" form on `/category/{id}`) would otherwise be submitted on
+    the FIRST instance only and silently skipped on every later one, even
+    though the filter's effect is instance-specific. Scoping to the template
+    keeps a genuinely page-invariant form (probed once) from being confused
+    with a per-instance one (probed once per shape), the same tradeoff
+    `probe_buttons` already makes for buttons.
     """
     found: List[Tuple[str, str]] = []
     for form in forms:
@@ -384,7 +396,7 @@ async def probe_forms(
         fields = form.get("fields") or []
         if any((f.get("type") or "") == "password" for f in fields):
             continue
-        sig = f"{form.get('submit')}|{len(fields)}"
+        sig = f"{scope}|{form.get('submit')}|{len(fields)}"
         if not form.get("submit") or sig in probed:
             continue
         probed.add(sig)
@@ -746,7 +758,7 @@ async def crawl(
         if fill_forms_enabled and node.forms:
             for tgt, via in await probe_forms(
                 controller, node.final_url, node.forms, origin, probed_forms,
-                pacer=pacer,
+                pacer=pacer, scope=templatize(node.path),
             ):
                 if tgt not in seen:
                     discovered.append((tgt, via))

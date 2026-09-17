@@ -226,7 +226,13 @@ def test_generate_accepts_the_golden_catalog_end_to_end(tmp_path):
     catalog_path.write_text(json.dumps(_GOLDEN_SITE_JSON), encoding="utf-8")
     out_dir = tmp_path / "drivers" / "example"
 
-    res = CliRunner().invoke(
+    # mix_stderr=False: the golden catalog's `evidence` field (an illustrative
+    # path, not a real file in tmp_path) makes `generate` print a missing-file
+    # WARNING to stderr (correct -- see plan v2.0 WD-D2's evidence-copy
+    # feature). Mixed into stdout by CliRunner's default, that warning would
+    # corrupt the `json.loads(res.output)` below; separating streams is the
+    # fix, not silencing a warning this test's own fixture legitimately earns.
+    res = CliRunner(mix_stderr=False).invoke(
         cli, ["generate", "--catalog", str(catalog_path), "--out", str(out_dir)]
     )
     assert res.exit_code == 0, res.output

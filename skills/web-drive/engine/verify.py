@@ -18,6 +18,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from .browser import BrowserController
 from .evidence import EvidenceBundler
 from .flow import MissingSecretError, build_action, evaluate_assertion, fail_reason
@@ -33,6 +35,14 @@ class StepResult:
     assertion: Dict[str, Any]
     passed: bool
     error: Optional[str] = None
+    # True only when `error` came from Playwright's OWN TimeoutError -- a
+    # locator that genuinely never resolved (site redeployed, selector rot).
+    # Deliberately NOT inferred by string-matching `error`'s text (the prior
+    # approach: substrings like "timeout"/"not found" in ANY exception's
+    # message, which misclassifies an unrelated error -- a network timeout,
+    # a custom app exception -- as selector drift just because its wording
+    # happens to overlap). The exception's TYPE is the actual signal.
+    drift: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -42,6 +52,7 @@ class StepResult:
             "assertion": self.assertion,
             "passed": self.passed,
             "error": self.error,
+            "drift": self.drift,
         }
 
 
@@ -51,6 +62,10 @@ class VerifyResult:
     verified: bool
     reason: Optional[str] = None
     steps: List[StepResult] = field(default_factory=list)
+    # Carries the halting step's own `drift` flag (see StepResult), so
+    # `runtime.py` can pick exit code 3 from a real signal instead of
+    # sniffing `reason`'s text for substrings.
+    drift: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,6 +73,7 @@ class VerifyResult:
             "verified": self.verified,
             "reason": self.reason,
             "steps": [s.to_dict() for s in self.steps],
+            "drift": self.drift,
         }
 
 
@@ -107,10 +123,14 @@ async def verify_capability(
 
         before = await controller.capture_state()
         perform_error: Optional[str] = None
+        step_drift = False
         try:
             await controller.perform(action)
             if step.get("settle_ms"):
                 await controller.settle(int(step["settle_ms"]))
+        except PlaywrightTimeoutError as exc:
+            perform_error = str(exc)
+            step_drift = True
         except Exception as exc:  # noqa: BLE001 — the failure IS the result
             perform_error = str(exc)
         after = await controller.capture_state()
@@ -130,11 +150,12 @@ async def verify_capability(
                 assertion.to_dict(),
                 step_passed,
                 perform_error,
+                step_drift,
             )
         )
         if not step_passed:
             reason = f"halted at {label!r}: {fail_reason(gate, assertion, perform_error)}"
-            return VerifyResult(verb, False, reason, results)
+            return VerifyResult(verb, False, reason, results, step_drift)
 
     if last_bundle is None:
         return VerifyResult(verb, False, "no steps to run", results)

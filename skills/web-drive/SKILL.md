@@ -5,11 +5,13 @@ description: Turns a live web app into a command-line tool an agent can operate.
 
 # web-drive
 
-> **Status: Phase G.** The engine ships `map`, `read`, `probe`, `verify`,
-> `extract` and `generate`. Capability inference (§3 below) is still agent
-> procedure — `generate` renders a driver FROM a catalog you assembled by
-> hand per §3, it does not infer one. Only Phase H (tests/freeze/ship) is
-> left — see `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
+> **Status: v1 complete (Phases A–H shipped, spec frozen at v1.4).** The engine
+> ships `map`, `read`, `probe`, `verify`, `extract` and `generate`, all
+> schema-frozen and test-guarded. Capability inference (§3 below) is a
+> **deliberate, permanent design choice, not an unfinished phase** — `generate`
+> renders a driver FROM a catalog you assemble by hand per §3; it does not
+> infer one, and never will, by design (the engine/agent split this whole
+> family is built on). See `docs/WEB_DRIVE_SPECIFICATION.md` and `TODO.md`.
 
 ## Mission — make the app operable, not just understood
 
@@ -228,11 +230,12 @@ way `map --probe-buttons`/`--fill-forms` do.
 
 ### 3. Infer capabilities from map + read + probe output
 
-There is no `generate` command yet (Phase G) — this section is **your**
-procedure for turning `sitemap.json` + `surface.json` + `reconciliation.json`
-into the `capabilities[]` entries spec §5 describes, by hand, until the engine
-can do it for you. Engine output is evidence; naming, classifying and writing
-assertions is judgment, and judgment is yours.
+`generate` (§6 below) renders a driver from a catalog — it does not build the
+catalog itself. This section is **your** procedure for turning `sitemap.json`
++ `surface.json` + `reconciliation.json` into the `capabilities[]` entries
+spec §5 describes, by hand. That split is permanent, not a placeholder for a
+future phase: engine output is evidence; naming, classifying and writing
+assertions is judgment, and judgment stays yours.
 
 **Noun-verb naming.** `<noun> <verb>`, both lowercase, matching the domain the
 *app* uses — read its own nav labels and headings before inventing terms. A
@@ -356,6 +359,22 @@ instead. `verify` performs the real action every time it succeeds: a login
 verifies by actually signing in, a delete verifies by actually deleting. Pair
 a destructive verb's verification with a cleanup recipe where one exists.
 
+**Record the proof in the catalog, not just in your own head.** When a
+`verify` run passes, always pass `--output <path>` and carry that path
+forward into the capability entry you're assembling per §3: set
+`"verified_at"` to the run's own timestamp and `"evidence"` to the `--output`
+path. `generate` (§6) copies and redacts that file into the driver's own
+`runs/` and repoints `evidence` at the copy — but only if you gave it
+something to copy. A capability with no `evidence` field still ships (nothing
+requires it), it just carries no durable proof past this session.
+
+Also worth carrying into the assembled catalog: the full route list from your
+`map` run, as a top-level `"routes"` array (spec §5) — every route `map`
+discovered, not just the ones that became capabilities. This is
+documentation, not required for `generate` to work, but it's the difference
+between a driver whose manual says "here's what you can do" and one that also
+says "here's everything this app has, including what isn't wired up yet."
+
 ### 5. Extract structured records — the read-verb backbone
 
 ```bash
@@ -402,11 +421,24 @@ python -m engine.cli generate --catalog site.json --out ../../../drivers/<slug>
 does not infer, rank or verify anything; it only renders. Writes
 `drivers/<slug>/`:
 
-- `site.json` — the catalog, verbatim.
+- `site.json` — the catalog, verbatim, **except** each capability's own
+  `evidence` field: if it named a real file, that file gets copied (redacted)
+  into `runs/` and this field is repointed at the copy (below).
 - `SITEGUIDE.md` — a human-facing manual: every capability with its params
   table, destructive verbs flagged, and `unverified[]` entries listed with
   their withholding reason (so a human sees *why* a verb is missing, not just
   its absence).
+- `runs/<verb-slug>.json` — for every capability whose `evidence` field
+  pointed at a real file: a sanitized copy of that `verify` result. Every
+  step's typed-in `value`/`text` is replaced with a redaction placeholder
+  first, unconditionally — a resolved `{"env": "VAR"}` secret is a literal
+  value by the time `verify` records it, and nothing upstream redacts it, so
+  an unredacted copy would ship a real password (or just a real typed name)
+  inside a driver meant to be handed to someone else. What survives is what
+  actually proves the verb ran: selectors, HTTP status/method, gate checks,
+  assertions. A capability with no `evidence` field, or one pointing at a
+  file that isn't there, gets nothing written — `generate` reports the miss
+  rather than pretending it copied something.
 - `<slug>` (POSIX shim) and `<slug>.cmd` (Windows wrapper) — both load the
   SAME `_engine/runtime.py`.
 - `_engine/` — `runtime.py` and its dependency closure (`browser`, `models`,
@@ -433,5 +465,3 @@ CLI params substitute into a step's `${NAME}` references the same way a
 step's `{"env": "VAR"}` secrets already do (`flow.resolve_str`, reused
 verbatim) — write a capability's `steps` with `${title}` etc. and the
 generated `quiz create --title "Trees"` fills it in at runtime.
-
-*Phase H (tests, freeze, ship) is not implemented yet.*

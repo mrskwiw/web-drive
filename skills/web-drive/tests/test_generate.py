@@ -182,6 +182,109 @@ def test_generate_writes_a_self_contained_driver(tmp_path):
     assert (out_dir / "_engine" / "runtime.py").exists()
     assert (out_dir / "_engine" / "browser.py").exists()
 
+
+def test_generate_refuses_a_malformed_one_word_verb(tmp_path):
+    """WD-E2 (plan v2.0): `runtime.build_cli` does
+    `noun, _, _ = cap["verb"].partition(" ")`, which silently degrades a
+    one-word verb into its own noun-group with no verb subcommand instead of
+    erroring -- so a hand-authored catalog typo (`"verb": "quizlist"`) would
+    previously ship a working-looking but wrong command tree. `generate` must
+    refuse it instead."""
+    catalog = _catalog("http://example.invalid")
+    catalog["capabilities"][0]["verb"] = "quizlist"
+
+    catalog_path = tmp_path / "site.json"
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+    out_dir = tmp_path / "drivers" / "fixture"
+
+    res = CliRunner().invoke(
+        cli, ["generate", "--catalog", str(catalog_path), "--out", str(out_dir)]
+    )
+    assert res.exit_code != 0
+    assert "noun-verb" in res.output.lower() or "quizlist" in res.output
+    assert not out_dir.exists(), "a rejected catalog must not write a partial driver"
+
+
+def test_generate_copies_and_redacts_referenced_evidence(tmp_path):
+    """spec §5's evidence trail: a capability naming a real `evidence` file
+    gets that file copied into the driver's own `runs/`, with any typed-in
+    step value redacted (an `{"env": "VAR"}` secret resolves to the literal
+    value before `verify` ever records it -- nothing in `flow.py`/`evidence.py`
+    redacts that before serialization, so a raw copy would leak it)."""
+    catalog = _catalog("http://example.invalid")
+    evidence_src = tmp_path / "login-result.json"
+    evidence_src.write_text(
+        json.dumps(
+            {
+                "verb": "auth login",
+                "verified": True,
+                "steps": [
+                    {
+                        "label": "password",
+                        "bundle": {
+                            "action": {
+                                "type": "fill",
+                                "selector": "#password",
+                                "value": "Sup3rSecret!",
+                            },
+                            "gate": {"passed": True},
+                        },
+                        "passed": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    catalog["capabilities"][0]["evidence"] = str(evidence_src)
+
+    catalog_path = tmp_path / "site.json"
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+    out_dir = tmp_path / "drivers" / "fixture"
+
+    res = CliRunner().invoke(
+        cli, ["generate", "--catalog", str(catalog_path), "--out", str(out_dir)]
+    )
+    assert res.exit_code == 0, res.output
+
+    copied = out_dir / "runs" / "quiz-list.json"
+    assert copied.exists(), "evidence file was not copied into the driver's runs/"
+    copied_body = json.loads(copied.read_text(encoding="utf-8"))
+    assert copied_body["steps"][0]["bundle"]["action"]["value"] != "Sup3rSecret!", (
+        "the resolved secret value must never survive into a distributable driver"
+    )
+    assert copied_body["steps"][0]["bundle"]["action"]["selector"] == "#password", (
+        "redaction must strip the VALUE, not the whole action -- the selector "
+        "and gate result are what prove the capability actually ran"
+    )
+    assert copied_body["steps"][0]["bundle"]["gate"]["passed"] is True
+
+    written_catalog = json.loads((out_dir / "site.json").read_text(encoding="utf-8"))
+    assert written_catalog["capabilities"][0]["evidence"] == "runs/quiz-list.json", (
+        "the OUTPUT site.json must repoint evidence at the copy, not the "
+        "original (possibly outside the driver, possibly gone tomorrow) path"
+    )
+
+
+def test_generate_reports_missing_evidence_without_failing(tmp_path):
+    """A capability that CLAIMS evidence at a path that doesn't exist must be
+    disclosed, not silently ignored or treated as a generation failure --
+    same discipline as `capped`/`rate_limited`: say when something is not
+    what it claims, don't just drop it."""
+    catalog = _catalog("http://example.invalid")
+    catalog["capabilities"][0]["evidence"] = str(tmp_path / "does-not-exist.json")
+
+    catalog_path = tmp_path / "site.json"
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+    out_dir = tmp_path / "drivers" / "fixture"
+
+    res = CliRunner().invoke(
+        cli, ["generate", "--catalog", str(catalog_path), "--out", str(out_dir)]
+    )
+    assert res.exit_code == 0, res.output
+    assert "not found" in res.output, "a missing evidence file must be reported, not swallowed"
+    assert not (out_dir / "runs").exists(), "nothing should be copied for a miss"
+
     guide = (out_dir / "SITEGUIDE.md").read_text(encoding="utf-8")
     assert "quiz list" in guide
     assert "quiz delete" in guide
@@ -283,6 +386,44 @@ def test_runtime_failed_assertion_exits_1():
         _skip_if_no_chromium(res.exception)
     assert res.exit_code == 1, res.output
     assert json.loads(res.output)["verified"] is False
+
+
+def test_runtime_real_drift_exits_3():
+    """WD-T2 (plan v2.0): exit code 3 (drift) must fire from a REAL locator
+    timeout driven through the generated driver's own runtime dispatch, not
+    just asserted against `verify.py` directly. A step targeting a selector
+    that will never exist raises Playwright's own TimeoutError, which
+    `_exit_code_for` now reads via `VerifyResult.drift` (a real signal) rather
+    than string-matching the error text -- see verify.py/runtime.py."""
+    site = {
+        "schema_version": "1.0",
+        "site": {"slug": "drift", "base_url": None, "generated_at": "2026-09-17",
+                  "fingerprint": {}},
+        "auth": {"required": False},
+        "capabilities": [
+            {
+                "verb": "thing drift",
+                "kind": "mutating",
+                "destructive": False,
+                "preconditions": [],
+                "params": [],
+                "steps": [{"type": "click", "selector": "#totally-does-not-exist-anywhere"}],
+                "assert": {"content_contains": "unreachable"},
+            }
+        ],
+        "unverified": [],
+        "reconciliation": [],
+    }
+    with _server() as base:
+        site["site"]["base_url"] = base
+        app = build_cli(site)
+        res = CliRunner().invoke(app, ["thing", "drift", "--json"])
+
+    if res.exception:
+        _skip_if_no_chromium(res.exception)
+    assert res.exit_code == 3, res.output
+    payload = json.loads(res.output)
+    assert payload["verified"] is False
 
 
 def test_runtime_dry_run_prints_steps_without_executing():

@@ -11,10 +11,13 @@ criterion).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import stat
 from pathlib import Path
 from typing import Any, Dict
+
+import click
 
 # The pure, dependency-closed subset `runtime.py` actually needs at execution
 # time. Deliberately NOT map.py/read.py/probe.py/sitemap.py/cli.py/generate.py
@@ -46,6 +49,80 @@ if __name__ == "__main__":
 '''
 
 _CMD_TEMPLATE = "@echo off\r\npython \"%~dp0{slug}\" %*\r\n"
+
+# Fields on a step's recorded `action` that can hold a resolved secret or any
+# other typed-in value (a real business name, an address, ...) -- redacted
+# unconditionally in copied evidence, not just for params marked `secret`.
+# The evidence trail exists to prove a gate/assertion passed, not to publish
+# what was typed; `{"env": "VAR"}` / `${VAR}` resolve to the LITERAL value
+# before `verify` ever records it (flow.py's own docstring: "resolving
+# secrets by env-var reference so ... [nothing] downstream ever sees the
+# literal secret" describes the CATALOG, not the recorded evidence -- the
+# executed `Action.value` is real, and neither `evidence.py` nor `flow.py`
+# redacts it before serialization).
+_REDACTED_ACTION_FIELDS = ("value", "text")
+_REDACTED = "[redacted by generate -- see SITEGUIDE.md/spec §5]"
+
+
+def _redact_evidence(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip typed-in values from a verify-result bundle before it ships
+    inside a driver anyone might receive. Keeps everything that proves a
+    capability passed (gate checks, assertions, URLs, HTTP status/method,
+    console/page errors) -- only the literal field VALUES a step typed are
+    replaced, since those can be a resolved secret or just sensitive data
+    (a real name, address, ...) nobody asked to redistribute.
+    """
+    bundle = json.loads(json.dumps(bundle))  # deep copy; this is small JSON
+    for step in bundle.get("steps", []):
+        action = step.get("bundle", {}).get("action")
+        if not isinstance(action, dict):
+            continue
+        for field in _REDACTED_ACTION_FIELDS:
+            if action.get(field):
+                action[field] = _REDACTED
+    return bundle
+
+
+def _copy_evidence(catalog: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
+    """Copy each capability's referenced evidence file into `out_dir/runs/`,
+    redacted, and repoint the OUTPUT catalog's `evidence` field at the copy.
+
+    Evidence paths in the INPUT catalog are resolved relative to the current
+    working directory -- the same directory `verify --output ...` and this
+    `generate` call are both normally run from. A missing file is reported
+    (never silently ignored) and left pointing at its original path rather
+    than claiming a copy that didn't happen.
+    """
+    runs_dir = out_dir / "runs"
+    for cap in catalog.get("capabilities", []):
+        src_str = cap.get("evidence")
+        if not src_str:
+            continue
+        src = Path(src_str)
+        if not src.exists():
+            click.echo(
+                f"warning: evidence file for {cap.get('verb')!r} not found "
+                f"at {src} -- 'evidence' left as-is, nothing copied",
+                err=True,
+            )
+            continue
+        try:
+            bundle = json.loads(src.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            click.echo(
+                f"warning: evidence file for {cap.get('verb')!r} at {src} "
+                f"could not be read ({exc}) -- 'evidence' left as-is",
+                err=True,
+            )
+            continue
+        runs_dir.mkdir(exist_ok=True)
+        verb_slug = re.sub(r"[^a-z0-9]+", "-", cap["verb"].lower()).strip("-")
+        dest_name = f"{verb_slug}.json"
+        (runs_dir / dest_name).write_text(
+            json.dumps(_redact_evidence(bundle), indent=2), encoding="utf-8"
+        )
+        cap["evidence"] = f"runs/{dest_name}"
+    return catalog
 
 
 def render_siteguide(catalog: Dict[str, Any]) -> str:
@@ -102,11 +179,35 @@ def render_siteguide(catalog: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _validate_verb_shapes(catalog: Dict[str, Any]) -> None:
+    """Reject a malformed ``verb`` before anything is written.
+
+    `runtime.py`'s `build_cli` does `noun, _, _ = cap["verb"].partition(" ")`
+    -- if `verb` has no space at all, that degrades SILENTLY (a one-word verb
+    becomes its own noun-group with no verb subcommand: `quizlist --json`
+    quietly does something not intended, instead of `generate` refusing a
+    catalog entry that doesn't match spec §5's noun-verb convention). Fail
+    loud here instead, where the mistake is one line away from its source.
+    """
+    bad = [
+        cap.get("verb") for cap in catalog.get("capabilities", [])
+        if not (isinstance(cap.get("verb"), str) and len(cap["verb"].split(" ", 1)) == 2
+                and all(cap["verb"].split(" ", 1)))
+    ]
+    if bad:
+        raise click.ClickException(
+            "capabilities must use two-word \"noun verb\" naming (spec §5); "
+            f"found malformed verb(s): {bad!r}"
+        )
+
+
 def write_driver(catalog: Dict[str, Any], out_dir: Path, *, source_engine_dir: Path) -> Path:
     """Render `out_dir/` from `catalog`. Returns `out_dir`."""
     slug = catalog["site"]["slug"]
+    _validate_verb_shapes(catalog)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    catalog = _copy_evidence(catalog, out_dir)
     (out_dir / "site.json").write_text(json.dumps(catalog, indent=2), encoding="utf-8")
     (out_dir / "SITEGUIDE.md").write_text(render_siteguide(catalog), encoding="utf-8")
 

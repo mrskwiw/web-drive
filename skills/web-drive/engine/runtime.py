@@ -36,15 +36,6 @@ EXIT_PRECONDITION_FAILED = 2
 EXIT_DRIFT = 3
 EXIT_REFUSED = 4
 
-_DRIFT_MARKERS = (
-    "timeout",
-    "waiting for selector",
-    "no element",
-    "strict mode violation",
-    "not found",
-)
-
-
 def _load_session(session_path: Optional[str]) -> tuple[Any, Optional[str]]:
     if not session_path or not Path(session_path).exists():
         return None, None
@@ -58,7 +49,14 @@ def _exit_code_for(result: VerifyResult) -> int:
     reason = (result.reason or "").lower()
     if "missing secret" in reason:
         return EXIT_PRECONDITION_FAILED
-    if any(m in reason for m in _DRIFT_MARKERS):
+    # Drift is a real signal now (VerifyResult.drift, set only when a step's
+    # OWN failure was Playwright's TimeoutError -- a locator that genuinely
+    # never resolved), not a substring match against an arbitrary exception's
+    # text. The old `_DRIFT_MARKERS` list (searching `reason` for "timeout",
+    # "not found", etc.) misclassified any unrelated error whose message
+    # happened to contain one of those words -- a network timeout, a custom
+    # app exception -- as selector drift. See plan v2.0 WD-T2/S2.
+    if result.drift:
         return EXIT_DRIFT
     return EXIT_ASSERTION_FAILED
 

@@ -259,6 +259,67 @@ def test_verify_halts_at_the_first_broken_step(tmp_path):
     assert len(result["steps"]) == 1
 
 
+def test_verify_flags_a_real_locator_timeout_as_drift(tmp_path):
+    """WD-T2/S2 (plan v2.0): a step that raises Playwright's OWN TimeoutError
+    (a selector that genuinely never resolves -- the shape of real selector
+    rot after a redeploy) must set `drift: true`, on both the failing step
+    and the overall result, so `runtime.py` can classify it as exit code 3
+    from a real signal instead of sniffing the error text for substrings like
+    "timeout" or "not found" (which any unrelated exception's message could
+    coincidentally contain). This test drives an ACTUAL 15s Playwright
+    timeout against a selector that will never exist -- slow but real.
+    """
+    steps = [{"type": "click", "selector": "#this-selector-does-not-exist-anywhere"}]
+    steps_path = _write(tmp_path, "steps.json", steps)
+
+    with _server() as base:
+        res = _invoke(
+            [
+                "verify",
+                "--url",
+                base + "/search",
+                "--verb",
+                "drift probe",
+                "--steps",
+                steps_path,
+            ]
+        )
+
+    assert res.exit_code == 1, res.output  # raw `verify` CLI: 1 = ran, not verified
+    result = json.loads(res.output)
+    assert result["verified"] is False
+    assert result["drift"] is True, "a genuine locator timeout must be flagged as drift"
+    assert result["steps"][0]["drift"] is True
+    assert "Timeout" in result["steps"][0]["error"]
+
+
+def test_verify_does_not_flag_a_plain_assertion_failure_as_drift(tmp_path):
+    """The other half of WD-T2/S2: a step that runs successfully but fails
+    its OWN assertion (no exception at all, let alone a Playwright timeout)
+    must never be misread as drift."""
+    steps = [{"type": "click", "selector": "#go", "assert": {"content_contains": "never appears"}}]
+    steps_path = _write(tmp_path, "steps.json", steps)
+
+    with _server() as base:
+        res = _invoke(
+            [
+                "verify",
+                "--url",
+                base + "/search",
+                "--verb",
+                "assertion probe",
+                "--steps",
+                steps_path,
+            ]
+        )
+
+    assert res.exit_code == 1, res.output
+    result = json.loads(res.output)
+    assert result["verified"] is False
+    assert result["drift"] is False
+    assert result["steps"][0]["drift"] is False
+
+
 def test_verify_refuses_a_destructive_candidate_without_yes(tmp_path):
     steps_path = _write(tmp_path, "steps.json", [{"type": "click", "selector": "#go"}])
 

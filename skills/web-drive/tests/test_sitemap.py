@@ -747,6 +747,90 @@ def test_shell_buttons_are_cached_across_templates_after_two_confirmations():
     assert site["probe_cache_hits"] == 4, site["probe_cache_hits"]
 
 
+# -- form probing needs the same per-template scoping buttons already have ---
+
+_CROSS_TEMPLATE_INDEX = (
+    b"<!doctype html><title>Home</title><h1>Home</h1>"
+    b"<a href='/alpha'>Alpha</a><a href='/beta'>Beta</a>"
+)
+
+# Identically-SHAPED forms (bare <button>, one text field -- no id/name/class
+# on either, so `sel()` resolves both submits to the literal same selector
+# string, "button") on two DIFFERENT templates. Before WD-P1, `probe_forms`
+# deduped by `submit|field_count` alone with no template tier at all, so
+# submitting /alpha's form would mark that global signature "probed" and
+# /beta's -- a completely different page -- would be silently skipped.
+_CROSS_TEMPLATE_FORM = (
+    b"<!doctype html><title>{title}</title><h1>{title}</h1>"
+    b"<form action='{action}'><input type='text' name='q'>"
+    b"<button type='submit'>Filter</button></form>"
+)
+
+
+class _CrossTemplateFormHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/alpha":
+            body = _CROSS_TEMPLATE_FORM.replace(b"{title}", b"Alpha").replace(
+                b"{action}", b"/alpha/filtered"
+            )
+        elif path == "/beta":
+            body = _CROSS_TEMPLATE_FORM.replace(b"{title}", b"Beta").replace(
+                b"{action}", b"/beta/filtered"
+            )
+        elif path == "/alpha/filtered":
+            body = b"<!doctype html><title>Alpha Filtered</title><h1>Alpha Filtered</h1>"
+        elif path == "/beta/filtered":
+            body = b"<!doctype html><title>Beta Filtered</title><h1>Beta Filtered</h1>"
+        else:
+            body = _CROSS_TEMPLATE_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _cross_template_form_server():
+    srv = _Server(("127.0.0.1", 0), _CrossTemplateFormHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_form_probing_is_scoped_per_template_not_globally():
+    """WD-P1 (optimization plan v2.0): `probe_forms` had NO per-template tier
+    at all -- its dedup key was `submit_selector|field_count`, global from the
+    first route onward. Two different pages whose forms happen to be
+    identically SHAPED (same bare selector, same field count) collided under
+    that key, so the second page's form was silently never submitted --
+    completely different content, connected to nothing, invisible to a
+    generated driver. `probe_buttons` already solved exactly this for buttons
+    (scope|label); forms need the same tier.
+    """
+    with _cross_template_form_server() as base:
+        site = _map(
+            base, "--single-pass", "--fill-forms",
+            "--delay-ms", "0", "--max-rpm", "0",
+        )
+    paths = {r["path"] for r in site["routes"]}
+    assert "/alpha/filtered" in paths, f"alpha's form was never submitted: {sorted(paths)}"
+    assert "/beta/filtered" in paths, (
+        f"beta's form was skipped because its IDENTICALLY-SHAPED submit "
+        f"collided with alpha's under a global-only dedup key: {sorted(paths)}"
+    )
+
+
 def test_routes_carry_their_controls_and_forms():
     """A route list is not a walkable map; a route plus its addressable controls
     is. This costs no extra request -- the snapshot is already taken to find
