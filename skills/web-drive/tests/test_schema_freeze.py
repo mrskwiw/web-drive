@@ -42,6 +42,7 @@ def test_sitemap_schema_is_frozen():
         "link_discoveries",
         "templates",
         "collapsed_routes",
+        "probe_cache_hits",
         "_template_seen",
         "_collapsed",
         "_variants",

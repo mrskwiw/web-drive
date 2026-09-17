@@ -642,6 +642,111 @@ def test_button_probing_finds_routes_no_link_exposes_and_skips_mutating_labels()
     )
 
 
+# -- cross-template button-outcome caching (request-count optimization) ------
+
+_SECTION_PATHS = ("/s1", "/s2", "/s3", "/s4")
+
+_SHELL_INDEX = (
+    b"<!doctype html><title>Home</title><h1>Home</h1>"
+    b"<a href='/s1'>S1</a><a href='/s2'>S2</a><a href='/s3'>S3</a><a href='/s4'>S4</a>"
+)
+
+
+def _shell_section(n: int) -> bytes:
+    # Every section carries an IDENTICAL shell button (same label, same
+    # destination everywhere -- a header/settings-style control) and an
+    # IDENTICAL-LABEL button whose destination genuinely differs per page (a
+    # "View" link into that page's own detail route). Only the first must ever
+    # be safe to cache; the second must be probed fresh on every single page.
+    return (
+        f"<!doctype html><title>Section {n}</title><h1>Section {n}</h1>"
+        f"<button onclick=\"location.href='/chrome-target'\">Settings</button>"
+        f"<button onclick=\"\">Toggle Theme</button>"
+        f"<button onclick=\"location.href='/detail/{n}'\">View</button>"
+    ).encode()
+
+
+class _ShellHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    seen = []
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        _ShellHandler.seen.append(path)
+        if path in _SECTION_PATHS:
+            body = _shell_section(int(path[-1]))
+        elif path == "/chrome-target":
+            body = b"<!doctype html><title>Chrome target</title><h1>Settings</h1>"
+        elif path.startswith("/detail/"):
+            body = f"<!doctype html><title>Detail</title><h1>Detail {path[-1]}</h1>".encode()
+        else:
+            body = _SHELL_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _shell_server():
+    _ShellHandler.seen = []
+    srv = _Server(("127.0.0.1", 0), _ShellHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_shell_buttons_are_cached_across_templates_after_two_confirmations():
+    """The cost driver measured live on content-jumpstart.com, 2026-09-16: a
+    persistent app shell's buttons (theme toggles, a settings link) were being
+    re-probed -- full page reload, then click -- on EVERY one of 19 distinct
+    route templates, even though they are the same control everywhere. 5 shell
+    buttons x 19 templates cost ~76 redundant reloads for zero new routes, most
+    of them toggles that never navigate at all.
+
+    Each of `/s1`..`/s4` is its own template (no per-template dedup applies),
+    carries one button whose outcome is consistent everywhere (`Settings`), one
+    that never navigates anywhere (`Toggle Theme`), and one whose label repeats
+    but whose DESTINATION differs per page (`View` -> `/detail/{n}`). Only the
+    first two may ever be served from cache; the third must cost a fresh reload
+    on every single page, because a global cache serving IT would silently drop
+    three of four real routes.
+    """
+    with _shell_server() as base:
+        site = _map(
+            base, "--single-pass", "--probe-buttons",
+            "--delay-ms", "0", "--max-rpm", "0",
+        )
+
+    paths = {r["path"] for r in site["routes"]}
+    assert {"/chrome-target", "/detail/1", "/detail/2", "/detail/3", "/detail/4"} <= paths, (
+        f"a real route went missing -- caching must never cost coverage: {sorted(paths)}"
+    )
+
+    # /s1 and /s2 establish confidence (2 real probes each for BOTH shell
+    # buttons); /s3 and /s4 must reuse the cache for `Settings`/`Toggle Theme`
+    # but still pay for `View` fresh every time, since it is never trustworthy.
+    counts = {p: _ShellHandler.seen.count(p) for p in _SECTION_PATHS}
+    assert counts["/s1"] == 4, f"expected 1 visit + 3 real probes on /s1: {counts}"
+    assert counts["/s2"] == 4, f"expected 1 visit + 3 real probes on /s2: {counts}"
+    assert counts["/s3"] == 2, (
+        f"expected 1 visit + 1 real probe (View only) on /s3 once the shell "
+        f"buttons are confirmed cacheable: {counts}"
+    )
+    assert counts["/s4"] == 2, f"same as /s3, cache should already be warm: {counts}"
+
+    # 2 cache hits per route on /s3 and /s4 (Settings + Toggle Theme) = 4 total.
+    assert site["probe_cache_hits"] == 4, site["probe_cache_hits"]
+
+
 def test_routes_carry_their_controls_and_forms():
     """A route list is not a walkable map; a route plus its addressable controls
     is. This costs no extra request -- the snapshot is already taken to find

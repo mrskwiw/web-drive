@@ -170,6 +170,12 @@ class SiteMap:
     link_discoveries: int = 0
     templates: List[Dict[str, Any]] = field(default_factory=list)
     collapsed_routes: int = 0
+    # How many button probes were served from the cross-template outcome cache
+    # instead of paying another full-page-reload click (`sitemap.probe_buttons`).
+    # Disclosed so a lower `rate_limit.requests_total` never reads as a smaller
+    # or less-verified crawl -- every cache hit was itself built from two real,
+    # empirically-consistent clicks elsewhere in this same run.
+    probe_cache_hits: int = 0
     _template_seen: Dict[str, int] = field(default_factory=dict)
     _collapsed: Dict[str, int] = field(default_factory=dict)
     _variants: Dict[str, List[str]] = field(default_factory=dict)
@@ -197,6 +203,7 @@ class SiteMap:
             "link_discoveries": self.link_discoveries,
             "templates": list(self.templates),
             "collapsed_routes": self.collapsed_routes,
+            "probe_cache_hits": self.probe_cache_hits,
             "_template_seen": dict(self._template_seen),
             "_collapsed": dict(self._collapsed),
             "_variants": {k: list(v) for k, v in self._variants.items()},

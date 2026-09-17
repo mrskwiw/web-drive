@@ -210,6 +210,36 @@ def is_probe_safe(text: str) -> bool:
     return bool(t) and not any(w in t for w in _MUTATING_WORDS)
 
 
+def _record_cross_template_outcome(
+    label: str,
+    outcome: str,
+    seen_once: Dict[str, str],
+    confirmed: Dict[str, str],
+    varies: Set[str],
+) -> None:
+    """Track whether a label's outcome is stable across DIFFERENT templates.
+
+    First occurrence just remembers what happened (`outcome`: a normalized
+    destination URL, or `""` for "clicked, nothing navigated" -- a toggle or a
+    modal). A second occurrence elsewhere that agrees promotes the label to
+    `confirmed`, safe to reuse without clicking again. A second occurrence that
+    disagrees marks it `varies` PERMANENTLY -- a "Next"/"View"-style label that
+    means something different per page must never be trusted globally, even if
+    a later occurrence would have coincidentally matched an earlier one.
+    """
+    if label in varies or label in confirmed:
+        return
+    prior = seen_once.get(label)
+    if prior is None:
+        seen_once[label] = outcome
+        return
+    if prior == outcome:
+        confirmed[label] = outcome
+    else:
+        varies.add(label)
+        seen_once.pop(label, None)
+
+
 async def probe_buttons(
     controller: BrowserController,
     url: str,
@@ -219,7 +249,10 @@ async def probe_buttons(
     max_probes: Optional[int] = None,
     scope: str = "",
     pacer: Optional[Callable[[], Awaitable[None]]] = None,
-) -> List[Tuple[str, str]]:
+    cross_template_seen: Optional[Dict[str, str]] = None,
+    cross_template_confirmed: Optional[Dict[str, str]] = None,
+    cross_template_varies: Optional[Set[str]] = None,
+) -> Tuple[List[Tuple[str, str]], int]:
     """Click navigation-looking buttons to find routes no <a href> exposes.
 
     SPAs route through onClick handlers constantly -- an interstitial whose only
@@ -227,8 +260,28 @@ async def probe_buttons(
     is exactly how this app first mapped to a single route. Each candidate is
     clicked from a freshly re-navigated page so one button's side effects cannot
     contaminate the next one's result.
+
+    That re-navigate is a full page load, and it is the dominant cost of a
+    button-heavy crawl (measured live on content-jumpstart.com, 2026-09-16:
+    ~8-9 requests per probe, most of them the SPA's own JS/CSS/data-fetch calls
+    a fresh navigation re-triggers). A persistent app shell -- a header, a theme
+    switcher, an AI-assistant toggle -- renders the SAME control on every route,
+    so probing it once per template (the existing dedup below) still re-pays the
+    full cost once per DIFFERENT template: 5 shell buttons across 19 distinct
+    templates cost ~76 of those reloads for zero new routes (most shell controls
+    are toggles/modals that never navigate at all).
+
+    `cross_template_*`, when supplied, cache a label's outcome ACROSS templates:
+    once the SAME label has produced the SAME outcome (a destination, or "no
+    navigation") on two DIFFERENT route scopes, it is trusted and reused without
+    a third click -- freeing its slot in `max_probes` for a page-specific control
+    that would otherwise be starved (BUGS.md 2026-08-26). A label whose outcome
+    DIFFERS between two scopes is marked permanently untrustworthy and always
+    re-probed per template, same as today -- this cache only ever skips a click
+    it has empirically verified is redundant, never guesses.
     """
     found: List[Tuple[str, str]] = []
+    cache_hits = 0
     budget = max_probes
     for ctl in controls:
         if budget is not None and budget <= 0:
@@ -247,6 +300,19 @@ async def probe_buttons(
         key = f"{scope}|{label}"
         if key in probed_labels:
             continue
+
+        if cross_template_confirmed is not None and label in cross_template_confirmed:
+            # Empirically confirmed stable on >=2 other templates already --
+            # reuse it instead of paying another reload to re-learn the same
+            # fact. Does not spend `max_probes` budget: a control we already
+            # know about should not crowd out one we do not.
+            probed_labels.add(key)
+            cache_hits += 1
+            dest = cross_template_confirmed[label]
+            if dest:
+                found.append((dest, f"button:{ctl.get('text','')[:40]}[cached]"))
+            continue
+
         probed_labels.add(key)
         if budget is not None:
             budget -= 1
@@ -260,11 +326,25 @@ async def probe_buttons(
             )
             await controller.settle(900)
             after = controller.page.url
-            if normalize(after) != normalize(before) and same_origin(after, origin):
-                found.append((normalize(after), f"button:{ctl.get('text','')[:40]}"))
+            outcome = (
+                normalize(after)
+                if (normalize(after) != normalize(before) and same_origin(after, origin))
+                else ""
+            )
+            if outcome:
+                found.append((outcome, f"button:{ctl.get('text','')[:40]}"))
+            if (
+                cross_template_seen is not None
+                and cross_template_confirmed is not None
+                and cross_template_varies is not None
+            ):
+                _record_cross_template_outcome(
+                    label, outcome, cross_template_seen, cross_template_confirmed,
+                    cross_template_varies,
+                )
         except Exception:  # noqa: BLE001 — a button that will not click is not a route
             continue
-    return found
+    return found, cache_hits
 
 
 # Values safe to type into a discovery form. Nothing here should read as real
@@ -488,6 +568,13 @@ async def crawl(
         params = {}
     probed_labels: Set[str] = set()
     probed_forms: Set[str] = set()
+    # Cross-template button-outcome cache (see `probe_buttons`'s docstring). Not
+    # carried across --resume legs, same as the timing counters: re-establishing
+    # confidence after a gap is cheap (two clicks) and safer than trusting a
+    # cache built in a prior process.
+    cross_template_seen: Dict[str, str] = {}
+    cross_template_confirmed: Dict[str, str] = {}
+    cross_template_varies: Set[str] = set()
     # Distinct same-origin targets reached via <a href> this leg. Kept separate
     # from `seen` (which also holds button/form finds and the entry) so the
     # navigation heuristic below measures the LINK mechanism specifically.
@@ -638,7 +725,7 @@ async def crawl(
 
         discovered: List[Tuple[str, str]] = []
         if probe_buttons_enabled and node.controls:
-            for tgt, via in await probe_buttons(
+            button_finds, cache_hits = await probe_buttons(
                 controller,
                 node.final_url,
                 node.controls,
@@ -647,7 +734,12 @@ async def crawl(
                 max_probes=max_probes,
                 scope=templatize(node.path),
                 pacer=pacer,
-            ):
+                cross_template_seen=cross_template_seen,
+                cross_template_confirmed=cross_template_confirmed,
+                cross_template_varies=cross_template_varies,
+            )
+            site.probe_cache_hits += cache_hits
+            for tgt, via in button_finds:
                 if tgt not in seen:
                     discovered.append((tgt, via))
 

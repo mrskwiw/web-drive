@@ -134,6 +134,18 @@ load per candidate, so it is the main driver of runtime. `--fill-forms` reaches
 what sits behind search and filter gates; it never submits a form marked
 destructive or one containing a password field.
 
+A persistent app shell (a header, a theme switcher, an AI-assistant toggle)
+renders the SAME button on every route, so probing it once per template still
+re-pays the full reload cost once per *different* template — measured live on
+content-jumpstart.com (2026-09-16): 5 shell buttons across 19 distinct templates
+cost ~76 redundant reloads for zero new routes, most of them toggles that never
+navigate at all. Once a button's label has produced the SAME outcome (a
+destination, or "clicked, nothing navigated") on two *different* templates, `map`
+trusts it and stops re-clicking it — freeing its `--max-probes` slot for a
+page-specific control instead. A label whose outcome differs between templates
+is never cached and is always re-probed, so this never costs coverage; the
+output's `probe_cache_hits` field says how many clicks this run actually skipped.
+
 **Two caps stay on, and neither limits reachability.** They bound *effort per
 unit of coverage*, which is the opposite thing — removing them shrinks the map:
 
