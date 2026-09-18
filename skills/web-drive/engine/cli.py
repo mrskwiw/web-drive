@@ -31,6 +31,12 @@ import click
 from .browser import BrowserController
 from .extract import extract_records
 from .generate import write_driver
+from .interact import InteractError
+from .interact import click as interact_click_impl
+from .interact import fill as interact_fill_impl
+from .interact import read as interact_read_impl
+from .interact import start_session as start_interact_session
+from .interact import stop as interact_stop_impl
 from .models import BrowserEngine
 from .probe import (
     is_probe_safe,
@@ -987,6 +993,118 @@ def login(
             "trusting it.",
             err=True,
         )
+    _emit(result, None)
+
+
+@cli.group()
+def interact() -> None:
+    """A persistent, agent-driven browser session spanning SEPARATE CLI calls.
+
+    For a gated/stateful flow `map --probe-buttons` could only leave a lead
+    on (a `gated_controls`/`state_changing_controls` entry, v1.6): `start`
+    once, then `click`/`fill`/`read` one action at a time against the SAME
+    live page across as many separate invocations as it takes, `stop` when
+    done. No engine allowlist, no auto-chaining, no guessed values -- every
+    action is one explicit call the agent chooses to make, exactly the
+    manual procedure of reading a page and guessing a step sequence, just
+    against a live page instead of static markup. See engine/interact.py.
+    """
+
+
+@interact.command("start")
+@click.option("--url", required=True, help="Page to open once the session starts.")
+@click.option(
+    "--state",
+    "state_path",
+    required=True,
+    type=click.Path(),
+    help="Where to write this session's handle -- pass the SAME path to every "
+    "later `interact` call. Refuses to overwrite an existing one (stop it first) "
+    "so a browser process is never silently leaked.",
+)
+@click.option(
+    "--session",
+    default=None,
+    type=click.Path(exists=True),
+    help="Seed cookies/localStorage from a saved auth bundle (same format as "
+    "`map --session`).",
+)
+@click.option("--user-agent", default=None, help="Pin the user-agent for this session.")
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--timeout-s", default=10.0, type=float, help="How long to wait for chromium to start."
+)
+def interact_start(
+    url: str,
+    state_path: str,
+    session: str | None,
+    user_agent: str | None,
+    headless: bool,
+    timeout_s: float,
+) -> None:
+    """Launch a detached chromium and navigate to --url."""
+    try:
+        result = start_interact_session(
+            state_path, url, session=session, user_agent=user_agent,
+            headless=headless, timeout_s=timeout_s,
+        )
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("click")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+@click.option("--text", default=None, help="Click the first element containing this text.")
+@click.option(
+    "--selector", default=None, help="Click by CSS/role selector instead of --text."
+)
+def interact_click(state_path: str, text: str | None, selector: str | None) -> None:
+    """Click one control and report whether the page navigated or just changed."""
+    try:
+        result = interact_click_impl(state_path, text=text, selector=selector)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("fill")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+@click.option("--selector", required=True, help="Field to fill.")
+@click.option("--value", required=True, help="Text to type.")
+def interact_fill(state_path: str, selector: str, value: str) -> None:
+    """Fill one field."""
+    try:
+        result = interact_fill_impl(state_path, selector, value)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("read")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+def interact_read(state_path: str) -> None:
+    """Report the current URL/title/visible-text preview, no action taken."""
+    try:
+        result = interact_read_impl(state_path)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("stop")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+def interact_stop(state_path: str) -> None:
+    """Kill the detached chromium and remove the session handle."""
+    try:
+        result = interact_stop_impl(state_path)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
     _emit(result, None)
 
 

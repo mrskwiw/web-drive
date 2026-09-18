@@ -344,6 +344,61 @@ what `probe` actually observed succeeding, not from what seems plausible — the
 whole point of verify-or-withhold (Phase E) is that an assertion is only as
 good as the evidence that produced it.
 
+### 3a. Driving a gated/stateful flow interactively — an alternative to guessing steps from markup
+
+A `state_changing_controls`/`gated_controls` entry (the "Map the route graph"
+step above, v1.6) names a lead,
+not an answer: a button changed the page without navigating, or failed to
+click because something else on the page has to happen first. The default
+way to turn that lead into `steps[]` is to read the page's HTML and write a
+guess, then bet on `verify` passing in one shot — workable, but a same-URL
+wizard with several sequential steps (content-jumpstart.com's Project Wizard:
+Client → Research → Templates → Quality Gate → Export) means several guesses
+compound, and a wrong one three steps in gives no signal about which step was
+wrong.
+
+`interact` is the other option: a real browser that stays open across
+SEPARATE CLI calls, so you click one thing, see the ACTUAL result, and decide
+the next click — the same manual process, but against a live page instead of
+static markup, and with ground truth after every step instead of only at the
+end.
+
+```bash
+python -m engine.cli interact start --url <URL> --state session.json \
+    [--session <auth-bundle>] [--headless]
+python -m engine.cli interact read  --state session.json
+python -m engine.cli interact click --state session.json --text "Continue to Research"
+python -m engine.cli interact fill  --state session.json --selector "#foo" --value "bar"
+python -m engine.cli interact stop  --state session.json
+```
+
+Each call is a separate process; `--state` is the handle connecting them (one
+call per `--state` path — reuse it for every action against the same
+session, and always `stop` when done, or the detached chromium process leaks).
+`click --text "..."` matches the first element containing that visible text
+(how a human would refer to a control); `--selector` targets precisely when
+text is ambiguous. `read`'s `content_preview` and `click`'s `changed`/
+`navigated` fields are your only feedback — there is no snapshot/DOM dump, on
+purpose: this is a discovery aid for finding the real sequence, not a
+replacement for `read`/`probe`.
+
+**No `--yes` gate, no auto-anything, and that's deliberate.** `interact`
+guesses nothing (no plausible values, no chaining through a flow on its own)
+and blocks nothing (no destructive-label filtering, no cost awareness) —
+every single click is a call YOU chose to make. The backstop is the same one
+`verify --destructive`/`--costs` already leans on: the session's own
+permission prompt over each Bash-level `interact` invocation. Never script an
+unattended sequence of `interact` calls against destructive-looking or
+costed-looking controls — do it the same deliberate, one-call-at-a-time way
+you would while actually watching.
+
+**Once the real sequence is known, still go through `verify`.** `interact`
+finding that "select the combobox, then click Continue" works is not itself
+verification — write the equivalent `steps.json` and run `verify` (§4) to get
+the deterministic gate, the `assert`, and (for anything destructive or
+costed) the explicit `--destructive`/`--costs --yes` confirmation. `interact`
+is how you FIND the steps; `verify` is still what proves them.
+
 ### 4. Verify a candidate — execute it, don't guess
 
 ```bash
