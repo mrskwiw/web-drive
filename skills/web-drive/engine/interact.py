@@ -218,14 +218,20 @@ def _pick_page(browser: Any) -> Any:
     """Find the page `start_session` navigated, not Chrome's own internal one.
 
     Reusing `browser.contexts[0]` (see `start_session`) means there is
-    normally exactly one context and one page, so `contexts[-1].pages[-1]`
-    would already find it. This filter is defense-in-depth for the one case
-    that still breaks that assumption: an action opens a popup/new tab
-    (`target=_blank`, `window.open`), leaving a second page whose position in
-    `context.pages` is not guaranteed to sort after the original. Filtering
-    OUT chrome's own internal pages (`chrome://`, devtools) rather than
-    trusting position is the one signal that stays reliable regardless --
-    this module never navigates to one of those on purpose."""
+    normally exactly one context and one page. Filtering OUT chrome's own
+    internal pages (`chrome://`, devtools) is the one signal that stays
+    reliable regardless of position -- this module never navigates to one of
+    those on purpose.
+
+    Refuses on more than one candidate rather than guessing (post-commit
+    review, 2026-09-18): a popup/new tab (`target=_blank`, `window.open`)
+    leaves a SECOND non-internal page, and silently picking one -- by
+    position or any other heuristic -- risks every later call reading or
+    mutating the wrong surface, including a real action landing on a page the
+    caller never intended. No stable page identity is tracked across the
+    separate processes this module is built around, so ambiguity here has no
+    safe automatic resolution; failing loudly matches this codebase's
+    conservative-by-construction rule elsewhere (see probe.py)."""
     candidates = [
         page
         for context in browser.contexts
@@ -238,7 +244,15 @@ def _pick_page(browser: Any) -> Any:
             "`stop` already called against this state file, or its process "
             "killed some other way?"
         )
-    return candidates[-1]
+    if len(candidates) > 1:
+        urls = ", ".join(p.url for p in candidates)
+        raise InteractError(
+            f"{len(candidates)} non-internal pages are open ({urls}) -- a click "
+            "likely opened a popup/new tab. interact has no way to know which "
+            "one you mean and will not guess; close the extra page yourself or "
+            "avoid the control that opened it."
+        )
+    return candidates[0]
 
 
 def click(state_path: str, text: Optional[str] = None, selector: Optional[str] = None) -> Dict[str, Any]:
@@ -300,21 +314,129 @@ def read(state_path: str) -> Dict[str, Any]:
     return asyncio.run(_do())
 
 
-def stop(state_path: str) -> Dict[str, Any]:
-    state = _read_state(state_path)
-    pid = state["pid"]
+def _process_cmdline(pid: int) -> Optional[str]:
+    """The running process's own command line, or:
+    - ``""`` when the check genuinely ran and found no such process (it
+      already exited) -- a confident negative.
+    - ``None`` when the check itself could not run (platform tool missing,
+      denied, or errored) -- unknown, not negative.
+
+    Uses PowerShell's `Get-CimInstance` on Windows, not `wmic`: confirmed
+    live on a current Windows 11 build that `wmic` itself returns a non-zero
+    exit code and no output for an ordinary, real, currently-running PID --
+    `wmic` is deprecated and unreliable-to-absent on modern Windows, not a
+    rare corner case worth a graceful fallback for. `Get-CimInstance`
+    confirmed working the same way for both a real PID and a nonexistent one
+    (empty output, exit 0 -- a clean negative, not an error) before this was
+    trusted for `stop`'s kill decision."""
     try:
         if sys.platform == "win32":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                check=False,
+            out = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    f"Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" "
+                    "| Select-Object -ExpandProperty CommandLine",
+                ],
+                capture_output=True, text=True, timeout=10, check=False,
             )
-        else:
-            os.kill(pid, signal.SIGKILL)
-    except (ProcessLookupError, OSError):  # noqa: BLE001 — already gone is fine
-        pass
-    shutil.rmtree(state.get("profile_dir", ""), ignore_errors=True)
+            if out.returncode != 0:
+                return None
+            return out.stdout or ""
+        cmdline_path = Path(f"/proc/{pid}/cmdline")
+        if cmdline_path.exists():
+            return cmdline_path.read_text(encoding="utf-8", errors="replace").replace("\x00", " ")
+        return ""
+    except Exception:  # noqa: BLE001 — the check itself failed, not a negative result
+        return None
+
+
+def stop(state_path: str) -> Dict[str, Any]:
+    """Kill the chromium `start_session` launched and remove its profile dir.
+
+    Verifies the PID still names a process running from OUR OWN profile dir
+    before killing it, and only ever removes a directory this module itself
+    created (post-commit review, 2026-09-18): trusting a bare PID out of a
+    JSON state file is unsafe on two counts -- the process can have already
+    exited and the PID been reused by something unrelated by the time `stop`
+    runs, and the file could be corrupted or hand-edited. Matching the
+    profile dir against the live process's own command line, and restricting
+    `rmtree` to a path this module's own `tempfile.mkdtemp(prefix="wd-interact-")`
+    would have produced, means a stale or tampered state file can fail to
+    clean up but can never kill an unrelated process or delete an arbitrary
+    directory.
+
+Refuses to kill whenever verification does not come back as a CONFIRMED
+    match -- an unavailable check (`_process_cmdline` returns `None`) is
+    treated the same as a confirmed non-match, not as "assume yes and kill
+    anyway." A second review argued the opposite default (kill when
+    unverifiable) to avoid leaking the chromium process; that was tried and
+    reverted after it turned out `wmic` returns a non-zero exit for an
+    ordinary, real, currently-running process on a real, current Windows
+    build tested live -- "verification unavailable" is not the rare corner
+    case that tradeoff assumed, it was effectively the ALWAYS case with
+    `wmic`, which would have made the kill-anyway fallback fire on every
+    single `stop` call and defeat the PID check entirely. Switching to
+    PowerShell's `Get-CimInstance` (see `_process_cmdline`) fixed the
+    underlying reliability problem instead of papering over it with a
+    weaker default; an occasional leaked profile dir when a check tool is
+    genuinely absent is still the correct failure mode to prefer over ever
+    killing a process this session didn't launch.
+
+    Two further hardenings a second review raised are DELIBERATELY NOT
+    applied, and won't be without a concrete report of them mattering in
+    practice: closing the microsecond TOCTOU window between this check and
+    the kill call with an OS-level process handle, and replacing the
+    profile-dir substring/prefix check with a cryptographic ownership token.
+    Both add real complexity to a LOCAL, single-operator CLI helper with no
+    adversarial input path -- the process this launches is on the same
+    machine, under the same user, for the same short-lived session as the
+    caller. The failure mode being defended against (a PID happens to be
+    reused by something else in the instant between check and kill, or a
+    hand-crafted state file's path happens to collide with an unrelated
+    directory) is a nuisance for a dev tool, not a security compromise, and
+    chasing it further is exactly the reviewer ping-pong this project's own
+    convention says to stop and make a call on instead."""
+    state = _read_state(state_path)
+    profile_dir = state.get("profile_dir", "")
+
+    # `pid` reaches a PowerShell command STRING in `_process_cmdline` (and a
+    # taskkill argv) -- a state file is exactly the "could be tampered" input
+    # this function's own docstring already reasons about, so a non-integer
+    # value here must never survive to be interpolated into either (a third
+    # post-commit review round correctly caught this: a hand-edited "pid" of
+    # e.g. "0; Remove-Item C:\\" would otherwise execute as PowerShell).
+    # str/int's own conversion rules are the whole check: a genuine int (or a
+    # clean digit string) survives, anything else raises here, well before
+    # either subprocess call.
+    try:
+        pid = int(state["pid"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InteractError(
+            f"{state_path!r} has a non-integer pid ({state.get('pid')!r}) -- "
+            "refusing to use it in a process-management command"
+        ) from exc
+
+    cmdline = _process_cmdline(pid) if profile_dir else ""
+    if cmdline is not None and profile_dir in cmdline:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    check=False,
+                )
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):  # noqa: BLE001 — already gone is fine
+            pass
+
+    profile_path = Path(profile_dir) if profile_dir else None
+    if (
+        profile_path is not None
+        and profile_path.name.startswith("wd-interact-")
+        and profile_path.parent == Path(tempfile.gettempdir())
+    ):
+        shutil.rmtree(profile_path, ignore_errors=True)
     Path(state_path).unlink(missing_ok=True)
     return {"stopped": True, "pid": pid}
 

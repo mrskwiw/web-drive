@@ -172,3 +172,149 @@ def test_interact_click_requires_text_or_selector(tmp_path):
         assert "--text or --selector" in (r.stdout + r.stderr)
 
         _interact("stop", "--state", state)
+
+
+def test_interact_stop_refuses_to_kill_a_pid_that_does_not_match_the_profile_dir(tmp_path):
+    """Post-commit review (2026-09-18): a bare PID out of a JSON state file is
+    unsafe to trust blindly -- the real process can have already exited and
+    the PID been reused by something unrelated by the time `stop` runs, or the
+    file could be tampered. `stop` must verify the live process's own command
+    line actually references OUR profile dir before ever sending a kill.
+
+    Uses this TEST's own pid with a profile_dir guaranteed not to appear in
+    its command line -- if the guard were absent, `stop` would attempt to
+    kill the test runner itself (or crash trying)."""
+    from engine.interact import stop
+
+    state = tmp_path / "session.json"
+    bogus_profile = str(tmp_path / "wd-interact-not-actually-launched")
+    state.write_text(
+        json.dumps({
+            "schema": 1,
+            "pid": os.getpid(),
+            "port": 0,
+            "profile_dir": bogus_profile,
+            "entry_url": "http://example.invalid",
+        }),
+        encoding="utf-8",
+    )
+
+    result = stop(str(state))
+
+    assert result["stopped"] is True
+    assert result["pid"] == os.getpid()
+    assert not state.exists()  # the state handle is still cleaned up
+    # the real point of the test: we are still executing, so THIS process was
+    # not sent taskkill/SIGKILL despite the state file naming its own pid.
+
+
+def test_interact_stop_refuses_the_kill_when_verification_itself_is_unavailable(tmp_path, monkeypatch):
+    """Second post-commit review round (2026-09-18): first tried the OPPOSITE
+    default (kill when verification can't run at all, to avoid leaking the
+    chromium process on a missing tool) -- reverted after confirming live on
+    this real Windows box that the original `wmic`-based check returns a
+    non-zero exit for an ordinary, real, running process. "Unverifiable" was
+    not the rare corner case that tradeoff assumed; with a broken `wmic` it
+    was effectively the ALWAYS case, which would fire the kill-anyway
+    fallback on every single `stop` call and defeat the PID check entirely.
+    Switching to PowerShell's `Get-CimInstance` fixed the underlying
+    reliability problem; `stop` itself stays safe-by-default regardless --
+    an unverifiable check refuses the kill, same as a confirmed non-match.
+
+    Mocks `_process_cmdline` to return `None` (the "couldn't check" case) and
+    confirms `stop` does NOT attempt the kill."""
+    import engine.interact as interact_module
+
+    killed = {}
+
+    def fake_cmdline(pid):
+        return None  # simulates a verification tool that could not run at all
+
+    def fake_run(args, **kwargs):
+        killed["taskkill_args"] = args
+        class _Result:
+            returncode = 0
+        return _Result()
+
+    monkeypatch.setattr(interact_module, "_process_cmdline", fake_cmdline)
+    monkeypatch.setattr(interact_module.subprocess, "run", fake_run)
+
+    state = tmp_path / "session.json"
+    state.write_text(
+        json.dumps({
+            "schema": 1,
+            "pid": 999999,
+            "port": 0,
+            "profile_dir": str(tmp_path / "wd-interact-fake"),
+            "entry_url": "http://example.invalid",
+        }),
+        encoding="utf-8",
+    )
+
+    result = interact_module.stop(str(state))
+
+    assert result["stopped"] is True
+    assert "taskkill_args" not in killed, (
+        "an unverifiable check must refuse the kill, not assume a match"
+    )
+
+
+def test_interact_stop_refuses_a_non_integer_pid(tmp_path):
+    """Third post-commit review round (2026-09-18): `pid` reaches a
+    PowerShell command STRING (`_process_cmdline`) and a taskkill argv -- a
+    state file is exactly the "could be tampered" input this module already
+    reasons about elsewhere, so a hand-edited non-integer pid (a PowerShell
+    injection attempt, e.g. "0; Remove-Item C:\\") must be rejected before
+    it ever reaches either subprocess call, not silently stringified into
+    one."""
+    from engine.interact import InteractError, stop
+
+    state = tmp_path / "session.json"
+    state.write_text(
+        json.dumps({
+            "schema": 1,
+            "pid": "0; Remove-Item C:\\ -Recurse -Force",
+            "port": 0,
+            "profile_dir": str(tmp_path / "wd-interact-fake"),
+            "entry_url": "http://example.invalid",
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InteractError, match="non-integer pid"):
+        stop(str(state))
+
+
+def test_pick_page_refuses_to_guess_between_two_non_internal_pages():
+    """Post-commit review (2026-09-18): silently picking a page by position
+    (or any heuristic) after a click opens a popup/new tab risks a later
+    action reading or mutating a surface the caller never intended. Must fail
+    loudly and name the ambiguity instead of guessing.
+
+    A direct unit test against `_pick_page` rather than a real popup driven
+    through headless chromium: `window.open` timing in headless mode proved
+    non-deterministic (flaky pass/hang depending on unrelated system load),
+    while the actual decision this fix makes -- refuse on >1 candidate --
+    has nothing to do with browser timing and is exactly and only what a
+    fake two-page browser needs to exercise."""
+    from engine.interact import InteractError, _pick_page
+
+    class _FakePage:
+        def __init__(self, url):
+            self.url = url
+
+    class _FakeContext:
+        def __init__(self, pages):
+            self.pages = pages
+
+    class _FakeBrowser:
+        def __init__(self, contexts):
+            self.contexts = contexts
+
+    browser = _FakeBrowser([_FakeContext([
+        _FakePage("http://example.invalid/"),
+        _FakePage("http://example.invalid/popup"),
+    ])])
+
+    with pytest.raises(InteractError, match="non-internal pages are open"):
+        _pick_page(browser)
