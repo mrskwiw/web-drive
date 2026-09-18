@@ -382,6 +382,13 @@ text is ambiguous. `read`'s `content_preview` and `click`'s `changed`/
 purpose: this is a discovery aid for finding the real sequence, not a
 replacement for `read`/`probe`.
 
+**`changed: false` is not proof nothing happened.** Confirmed live against
+content-jumpstart.com's own wizard: opening its client combobox reported
+`changed: false` (the click's own 400ms settle wasn't enough for that
+dropdown's render), yet a separate `read` immediately afterward clearly
+showed it open. Treat `changed`/`navigated` as a fast hint, not an answer —
+call `read` whenever it actually matters whether something happened.
+
 **No `--yes` gate, no auto-anything, and that's deliberate.** `interact`
 guesses nothing (no plausible values, no chaining through a flow on its own)
 and blocks nothing (no destructive-label filtering, no cost awareness) —

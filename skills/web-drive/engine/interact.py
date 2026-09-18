@@ -242,6 +242,12 @@ def _pick_page(browser: Any) -> Any:
 
 
 def click(state_path: str, text: Optional[str] = None, selector: Optional[str] = None) -> Dict[str, Any]:
+    """``changed: false`` is not proof nothing happened -- confirmed live
+    against content-jumpstart.com's own wizard: opening its client combobox
+    reported `changed: false` (the 400ms settle below wasn't enough for that
+    particular dropdown's render), yet a SEPARATE `read` immediately after
+    clearly showed it open. Treat `changed`/`navigated` as a fast hint only;
+    call `read` when the answer actually matters."""
     if not text and not selector:
         raise InteractError("pass --text or --selector")
     state = _read_state(state_path)
