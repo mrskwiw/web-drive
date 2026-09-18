@@ -715,6 +715,56 @@ def test_a_disabled_button_is_reported_as_gated_not_silently_skipped():
     )
 
 
+_CROWDED_INDEX = (
+    b"<!doctype html><title>Crowded</title><h1>Crowded</h1>"
+    b"<button>First</button><button>Second</button><button>Third</button>"
+)
+
+
+class _CrowdedHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = _CROWDED_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _crowded_server():
+    srv = _Server(("127.0.0.1", 0), _CrowdedHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_probe_budget_exhaustion_is_disclosed_not_silent():
+    """BUGS.md 2026-08-26: the probe budget is spent in DOM order, so a page
+    whose primary CTA renders after app-shell chrome can be starved before the
+    crawl ever reaches it -- and the old output had no way to distinguish
+    'clicked and found inert' from 'never clicked at all'. A budget of 1 against
+    3 probe-safe buttons must report exactly 1 probed and 2 skipped, not silence.
+    """
+    with _crowded_server() as base:
+        site = _map(
+            base, "--probe-buttons", "--max-probes", "1", "--delay-ms", "0", "--max-rpm", "0"
+        )
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    assert root["controls_probed"] == 1, root
+    assert root["controls_skipped_budget"] == 2, root
+
+
 # -- cross-template button-outcome caching (request-count optimization) ------
 
 _SECTION_PATHS = ("/s1", "/s2", "/s3", "/s4")

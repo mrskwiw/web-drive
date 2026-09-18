@@ -71,6 +71,15 @@ class RouteNode:
     # combobox is filled), reported distinctly from a click that simply throws
     # for some other reason.
     gated_controls: List[str] = field(default_factory=list)
+    # Disclosure for BUGS.md 2026-08-26: the probe budget is spent in DOM order,
+    # so a page whose primary CTA renders last (every control tied at one rank
+    # on React Native Web, or just a long control list) can exhaust `--max-probes`
+    # before ever reaching it -- and nothing in the old output revealed that a
+    # button was simply never clicked, as opposed to clicked and found inert.
+    # These two counts make "we clicked N of M probe-safe buttons" a fact you can
+    # read off the map instead of infer.
+    controls_probed: int = 0
+    controls_skipped_budget: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -89,6 +98,8 @@ class RouteNode:
             "forms": list(self.forms),
             "state_changing_controls": list(self.state_changing_controls),
             "gated_controls": list(self.gated_controls),
+            "controls_probed": self.controls_probed,
+            "controls_skipped_budget": self.controls_skipped_budget,
         }
 
     @classmethod
@@ -110,6 +121,8 @@ class RouteNode:
             forms=list(data.get("forms", [])),
             state_changing_controls=list(data.get("state_changing_controls", [])),
             gated_controls=list(data.get("gated_controls", [])),
+            controls_probed=data.get("controls_probed", 0),
+            controls_skipped_budget=data.get("controls_skipped_budget", 0),
         )
 
 
@@ -319,6 +332,13 @@ class SurfaceForm:
     # pay/delete/subscribe wording) — kept consistent so a form doesn't
     # change classification depending on which command looked at it.
     destructive: bool = False
+    # True only for the whole-document fallback group (BUGS.md 2026-09-16):
+    # a JS-managed multi-step flow with real input/select/textarea fields but
+    # no native <form> boundary at all. `selector` is then a document-wide
+    # marker, not a real submit scope -- this flag is what tells the agent
+    # not to read it as one, since "what counts as one form" with no <form>
+    # tag is a per-site judgment call this engine deliberately does not guess.
+    implicit: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -328,6 +348,7 @@ class SurfaceForm:
             "submit_selector": self.submit_selector,
             "submit_text": self.submit_text,
             "destructive": self.destructive,
+            "implicit": self.implicit,
         }
 
 

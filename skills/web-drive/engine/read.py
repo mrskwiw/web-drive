@@ -154,67 +154,115 @@ _SURFACE_JS = r"""
   }
 
   // -- forms: validation attrs + <select> options -----------------------------
-  const forms = [];
-  for (const f of document.querySelectorAll('form')) {
-    if (!visible(f)) continue;
-    const formSel = uniqueSel(f, sel(f));  // two unlabeled forms both resolve to "form"
-    const fields = [];
-    for (const inp of f.querySelectorAll('input, select, textarea')) {
-      if (!visible(inp)) continue;
-      const tag = inp.tagName;
-      const type = tag === 'INPUT' ? (inp.getAttribute('type') || 'text').toLowerCase() : tag.toLowerCase();
-      const options = tag === 'SELECT'
-        ? Array.prototype.slice.call(inp.options).map((o) => (o.textContent || '').trim())
-        : [];
-      fields.push({
-        selector: sel(inp),
-        role: roleOf(inp),
-        name: inp.getAttribute('name'),
-        label: labelFor(inp),
-        type,
-        required: inp.hasAttribute('required') || inp.getAttribute('aria-required') === 'true',
-        placeholder: inp.getAttribute('placeholder'),
-        maxlength: inp.hasAttribute('maxlength') ? Number(inp.getAttribute('maxlength')) : null,
-        minlength: inp.hasAttribute('minlength') ? Number(inp.getAttribute('minlength')) : null,
-        pattern: inp.getAttribute('pattern'),
-        options,
-        default_value: tag === 'SELECT' ? (inp.value || null) : (inp.getAttribute('value') || null),
-        aria_label: inp.getAttribute('aria-label'),
-        aria_describedby: inp.getAttribute('aria-describedby'),
-      });
-    }
-    // Same submit-resolution priority as `map`'s form capture (browser.py's
-    // `_SNAPSHOT_JS`), kept consistent on purpose: a bare first-button query
-    // picks up in-field controls (e.g. a show-password toggle), not submit.
-    const nonSubmit = [...f.querySelectorAll('button:not([type=button]):not([type=reset])')];
-    const submitEl =
-      f.querySelector('button[type=submit]') ||
-      f.querySelector('input[type=submit]') ||
-      f.querySelector('input[type=image]') ||
+  const DESTRUCTIVE = /\b(pay|checkout|purchase|place order|delete|remove|cancel account|unsubscribe|sign\s*up|register|create account)\b/;
+  const LOGIN = /\b(log\s*in|sign\s*in)\b/;
+
+  const buildField = (inp) => {
+    const tag = inp.tagName;
+    const type = tag === 'INPUT' ? (inp.getAttribute('type') || 'text').toLowerCase() : tag.toLowerCase();
+    const options = tag === 'SELECT'
+      ? Array.prototype.slice.call(inp.options).map((o) => (o.textContent || '').trim())
+      : [];
+    return {
+      selector: sel(inp),
+      role: roleOf(inp),
+      name: inp.getAttribute('name'),
+      label: labelFor(inp),
+      type,
+      required: inp.hasAttribute('required') || inp.getAttribute('aria-required') === 'true',
+      placeholder: inp.getAttribute('placeholder'),
+      maxlength: inp.hasAttribute('maxlength') ? Number(inp.getAttribute('maxlength')) : null,
+      minlength: inp.hasAttribute('minlength') ? Number(inp.getAttribute('minlength')) : null,
+      pattern: inp.getAttribute('pattern'),
+      options,
+      default_value: tag === 'SELECT' ? (inp.value || null) : (inp.getAttribute('value') || null),
+      aria_label: inp.getAttribute('aria-label'),
+      aria_describedby: inp.getAttribute('aria-describedby'),
+    };
+  };
+
+  // Same submit-resolution priority as `map`'s form capture (browser.py's
+  // `_SNAPSHOT_JS`), kept consistent on purpose: a bare first-button query
+  // picks up in-field controls (e.g. a show-password toggle), not submit.
+  // `scope` is a <form> for a real form, or `document` for the form-less
+  // fallback below.
+  const resolveSubmit = (scope) => {
+    const nonSubmit = [...scope.querySelectorAll('button:not([type=button]):not([type=reset])')];
+    return (
+      scope.querySelector('button[type=submit]') ||
+      scope.querySelector('input[type=submit]') ||
+      scope.querySelector('input[type=image]') ||
       (nonSubmit.length ? nonSubmit[nonSubmit.length - 1] : null) ||
-      f.querySelector('button');
-    // Scoped to the submit control's OWN text plus field labels -- NOT the
-    // whole form's innerText. A login form commonly nests a "Don't have an
-    // account? Sign up" cross-link inside the SAME <form> element; testing
-    // the full form text against `sign\s*up` misclassified an ordinary login
-    // as destructive (found live on quizsquirrel.com's /login, 2026-09-16).
-    // The form's own claim is what its submit button says it does.
+      scope.querySelector('button')
+    );
+  };
+
+  // Scoped to the submit control's OWN text plus field labels -- NOT the
+  // whole form's innerText. A login form commonly nests a "Don't have an
+  // account? Sign up" cross-link inside the SAME <form> element; testing
+  // the full form text against `sign\s*up` misclassified an ordinary login
+  // as destructive (found live on quizsquirrel.com's /login, 2026-09-16).
+  // The form's own claim is what its submit button says it does.
+  const classifyDestructive = (fields, submitEl) => {
     const ownText = (
       (submitEl ? (submitEl.innerText || submitEl.value || '') : '') +
       ' ' + fields.map((x) => x.label).join(' ')
     ).toLowerCase();
-    const DESTRUCTIVE = /\b(pay|checkout|purchase|place order|delete|remove|cancel account|unsubscribe|sign\s*up|register|create account)\b/;
-    const LOGIN = /\b(log\s*in|sign\s*in)\b/;
     const hasPassword = fields.some((x) => x.type === 'password');
-    const destructive = DESTRUCTIVE.test(ownText) || (hasPassword && !LOGIN.test(ownText));
+    return DESTRUCTIVE.test(ownText) || (hasPassword && !LOGIN.test(ownText));
+  };
+
+  const forms = [];
+  const formEls = Array.prototype.filter.call(document.querySelectorAll('form'), visible);
+  for (const f of formEls) {
+    const formSel = uniqueSel(f, sel(f));  // two unlabeled forms both resolve to "form"
+    const fields = [];
+    for (const inp of f.querySelectorAll('input, select, textarea')) {
+      if (!visible(inp)) continue;
+      fields.push(buildField(inp));
+    }
+    const submitEl = resolveSubmit(f);
     forms.push({
       selector: formSel,
       role_name: f.getAttribute('aria-label') || null,
       fields,
       submit_selector: submitEl ? sel(submitEl) : null,
       submit_text: submitEl ? (submitEl.innerText || submitEl.value || '').trim().slice(0, 100) : null,
-      destructive,
+      destructive: classifyDestructive(fields, submitEl),
+      implicit: false,
     });
+  }
+
+  // BUGS.md 2026-09-16: a form-less (JS-managed) multi-step wizard has real,
+  // requireable input fields with no native <form> boundary at all -- a
+  // common modern pattern (a controlled-component tree with its own submit
+  // handler, not <form onsubmit>). Reporting forms: [] for such a page
+  // silently hides the entire capability surface a verb author would need
+  // (spec §3: describe what the app OFFERS, not what markup convention it
+  // happens to use). Fall back to the whole document as ONE synthetic group
+  // when no <form> exists at all -- deliberately the simpler of the two
+  // fixes BUGS.md named, because "what counts as one form" with no <form>
+  // tag (per-question fieldset? the whole page?) is a real per-site judgment
+  // call this engine should not guess at; `implicit: true` discloses that
+  // this selector is not a real submit boundary.
+  if (formEls.length === 0) {
+    const looseFields = [];
+    for (const inp of document.querySelectorAll('input, select, textarea')) {
+      if (!visible(inp)) continue;
+      looseFields.push(buildField(inp));
+    }
+    if (looseFields.length) {
+      const submitEl = resolveSubmit(document);
+      forms.push({
+        selector: 'body',
+        role_name: null,
+        fields: looseFields,
+        submit_selector: submitEl ? sel(submitEl) : null,
+        submit_text: submitEl ? (submitEl.innerText || submitEl.value || '').trim().slice(0, 100) : null,
+        destructive: classifyDestructive(looseFields, submitEl),
+        implicit: true,
+      });
+    }
   }
 
   // -- error messages: visible role=alert / aria-live regions -----------------
@@ -276,6 +324,7 @@ async def read_surface(controller: BrowserController) -> PageSurface:
                 submit_selector=f.get("submit_selector"),
                 submit_text=f.get("submit_text"),
                 destructive=f.get("destructive", False),
+                implicit=f.get("implicit", False),
             )
             for f in raw.get("forms", [])
         ],

@@ -172,7 +172,14 @@ unit of coverage*, which is the opposite thing — removing them shrinks the map
 
 - `--max-probes` (12) — button probes per route. Unlimited, a 146-control page
   spends ~650 requests on itself and breadth-first never leaves depth 1
-  (measured: 13 routes uncapped vs 20 at 8).
+  (measured: 13 routes uncapped vs 20 at 8). The budget is spent in DOM order
+  with no ranking pass, so a page whose primary CTA renders last (React Native
+  Web ties every control at one rank, or the control just sits after a long
+  app-shell chrome list) can be starved before the crawl ever reaches it.
+  Every route now discloses `controls_probed`/`controls_skipped_budget`, so
+  "we clicked 12 of 63 probe-safe buttons" is a fact you can read off the map
+  instead of infer — a route with a nonzero `controls_skipped_budget` is worth
+  a manual `read`/`probe` pass on, the same way a `capped` map is.
 - `--max-query-variants` (3) — distinct query strings walked per path template.
   A faceted browse page is **one route with a parameter space**: every filter
   chip mints a URL, so the space is combinatorial and never converges.
@@ -219,6 +226,16 @@ This is a single-page read with no crawl and no navigation: point it at one
 route from a `sitemap.json` you already have. Nothing here is verified yet —
 `read` reports what the markup says, not what happens when you act on it.
 
+**A form-less page still gets a `forms[]` entry if it has real fields.** Many
+modern multi-step wizards are a controlled-component tree with its own submit
+handler, not a native `<form>` (quizsquirrel.com's `/quiz/create`, found
+live). When the page has zero `<form>` elements but has visible input/select/
+textarea fields, `read` falls back to ONE whole-document group flagged
+`"implicit": true` — that flag means the group's `selector` (`"body"`) is not
+a real submit boundary, unlike an ordinary form capture; treat it as "here are
+the fields and a best-guess submit control", not as one cohesive form to
+submit blind.
+
 ### 2. Check a claim against what navigation proves
 
 ```bash
@@ -232,7 +249,13 @@ happened — spec §3's "proves" half, run against `read`'s "claims" half:
   `is_probe_safe` skip as `map --probe-buttons` — delete/save/publish/buy
   wording is never clicked here either) and checks `advertised_absent` (the
   click fails, or lands on a >=400 status) and `label_route_mismatch` (it
-  navigates somewhere sharing none of the label's significant words);
+  navigates somewhere sharing none of the label's significant words). A
+  control that is `disabled` at the time of the click is skipped with no
+  finding at all, never reported `advertised_absent` — a disabled-by-design
+  control (a wizard step gated behind the prior one, a submit gated behind
+  required fields) isn't claiming to do anything yet, so there's nothing to
+  disprove; naming what it's gated on, if worth doing, is your call to make
+  by hand, same as `map`'s `gated_controls`;
 - submits every non-destructive form once per optional field left blank, to
   check `optional_but_required` (a new error appears that wasn't there
   before);
@@ -342,7 +365,27 @@ D6): `url_contains` for a route change, `content_contains` for text that must
 appear, `dom_contains` for a selector that must exist. Pick the assertion from
 what `probe` actually observed succeeding, not from what seems plausible — the
 whole point of verify-or-withhold (Phase E) is that an assertion is only as
-good as the evidence that produced it.
+good as the evidence that produced it. `dom_contains` matches against the
+`dom_outline` role/text tree of *interactive + landmark* nodes, not rendered
+body text — a page whose result is plain text (a confirmation, an error, a
+bare heading) has an EMPTY outline and every `dom_contains` against it fails
+even though the text is right there on the page. Use `content_contains` for a
+text outcome; reserve `dom_contains` for asserting a control or landmark
+exists.
+
+**Watch for a consent/overlay banner eating the FIRST click of a capability.**
+Found live: a cookie-consent backdrop sitting on top of a login form ate a
+`{"type":"click","selector":"button[type='submit']"}` step with EVERY gate
+check green — the click landed on the banner, not the form, so `verify`
+reported success while the URL never left `/login` and the step's `http[]`
+was empty. Nothing in the deterministic gate catches this (a click that
+"succeeds" against the wrong element looks identical to one that succeeds
+against the right one). Before authoring a capability's first interactive
+step, `read` the page and check for a `role=dialog`/consent-banner-shaped
+control; if one exists, add a step to dismiss it (e.g.
+`{"type":"click","selector":"text=Accept All"}`) BEFORE the real step. A step
+whose gate passed but produced zero URL change and zero network activity is
+worth treating as suspect for this reason even without a banner in evidence.
 
 ### 3a. Driving a gated/stateful flow interactively — an alternative to guessing steps from markup
 
@@ -547,8 +590,10 @@ catalog), `doctor` (re-check the site's title against the stored
 and `manual` (prints `SITEGUIDE.md`). Every verb command accepts `--json`,
 `--yes` (required for a `destructive: true` verb — refuses with exit 4
 otherwise, spec §7's permission gate, no engine allowlist), `--dry-run`
-(prints the steps without touching the browser), `--session`, and
-`--timeout`. Exit codes: 0 verified, 1 ran-but-not-verified, 2 precondition
+(prints the steps WITH THIS INVOCATION'S FLAGS RESOLVED — `content-jumpstart
+client create --name "Acme" --dry-run` shows `"value": "Acme"`, not the
+catalog's raw `${name}` template — without touching the browser), `--session`,
+and `--timeout`. Exit codes: 0 verified, 1 ran-but-not-verified, 2 precondition
 failed (no `--session` where a capability needs `auth`), 3 drift (a step's
 own locator wasn't found — this is how a redeployed site's selector-rot
 becomes visible instead of a confusing assertion failure), 4 refused.

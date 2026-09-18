@@ -498,12 +498,31 @@ def test_runtime_dry_run_prints_steps_without_executing():
     assert res.exit_code == 0, res.output
     payload = json.loads(res.output)
     assert payload["dry_run"] is True
-    # Un-resolved -- dry-run shows the catalog's own template, not a filled-in
-    # preview, so `${title}` is still literal here.
+    # BUGS.md 2026-09-17: `--dry-run` used to echo the catalog's raw `${title}`
+    # template verbatim regardless of what flags this invocation actually
+    # passed -- of limited use for exactly the case `--dry-run` exists for
+    # (previewing a mutating/destructive verb before spending `--yes` on it).
+    # It must now show what THIS invocation would actually send.
     assert payload["steps"] == [
-        {"type": "fill", "selector": "#title-field", "value": "${title}"},
+        {"type": "fill", "selector": "#title-field", "value": "Trees Quiz"},
         {"type": "click", "selector": "#create-btn"},
     ]
+
+
+def test_runtime_dry_run_reports_a_missing_secret_instead_of_crashing():
+    """A step referencing an unset env var must surface as preview-time
+    information (still `--dry-run`'s job to show, exit 0), not an unhandled
+    `MissingSecretError` traceback."""
+    site = _catalog("http://127.0.0.1:1")
+    site["capabilities"][1]["steps"] = [
+        {"type": "fill", "selector": "#secret-field", "value": "${DEFINITELY_UNSET_VAR}"},
+    ]
+    app = build_cli(site)
+    res = CliRunner().invoke(app, ["quiz", "create", "--title", "x", "--dry-run"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.output)
+    assert "DEFINITELY_UNSET_VAR" in payload["steps"][0]["value"]
+    assert "unresolved" in payload["steps"][0]["value"]
 
 
 def test_runtime_doctor_reports_no_drift_when_title_matches():

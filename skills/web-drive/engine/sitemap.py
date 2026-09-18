@@ -275,7 +275,7 @@ async def probe_buttons(
     cross_template_seen: Optional[Dict[str, str]] = None,
     cross_template_confirmed: Optional[Dict[str, str]] = None,
     cross_template_varies: Optional[Set[str]] = None,
-) -> Tuple[List[Tuple[str, str]], int, List[str], List[str]]:
+) -> Tuple[List[Tuple[str, str]], int, List[str], List[str], int, int]:
     """Click navigation-looking buttons to find routes no <a href> exposes.
 
     SPAs route through onClick handlers constantly -- an interstitial whose only
@@ -316,14 +316,34 @@ async def probe_buttons(
     get past it -- that would mean the crawler starts guessing valid business
     data and chaining through mutating flows on its own, which is exactly the
     line "probes are safe by default" (CLAUDE.md) exists to hold.
+
+    Returns ``(found, cache_hits, state_changes, gated_controls, controls_probed,
+    controls_skipped_budget)``. The last two are BUGS.md 2026-08-26's disclosure
+    fix: the budget is spent in DOM order (no ranking pass here), so a page whose
+    primary CTA is control 77 of 78 can be starved by app-shell chrome before the
+    crawl ever reaches it -- and the old return tuple had no way to say that
+    happened. `controls_skipped_budget` counts probe-safe, not-yet-probed
+    candidates the crawl declined to click purely because the budget ran out,
+    computed via a lookahead at the exhaustion point rather than by removing the
+    early `break` -- so `found`/`cache_hits`/ordering are unchanged from before,
+    the count is additive-only.
     """
     found: List[Tuple[str, str]] = []
     state_changes: List[str] = []
     gated_controls: List[str] = []
     cache_hits = 0
+    controls_probed = 0
+    controls_skipped_budget = 0
     budget = max_probes
-    for ctl in controls:
+    for idx, ctl in enumerate(controls):
         if budget is not None and budget <= 0:
+            for remaining in controls[idx:]:
+                rlabel = (remaining.get("text") or "").strip().lower()
+                if remaining.get("role") != "button" or not is_probe_safe(rlabel):
+                    continue
+                if f"{scope}|{rlabel}" in probed_labels:
+                    continue
+                controls_skipped_budget += 1
             break
         label = (ctl.get("text") or "").strip().lower()
         if ctl.get("role") != "button" or not is_probe_safe(label):
@@ -353,6 +373,7 @@ async def probe_buttons(
             continue
 
         probed_labels.add(key)
+        controls_probed += 1
         if budget is not None:
             budget -= 1
         try:
@@ -399,7 +420,7 @@ async def probe_buttons(
                 # as before: naming what a control is gated ON is the agent's job.
                 gated_controls.append(f"button:{ctl.get('text','')[:40]}")
             continue
-    return found, cache_hits, state_changes, gated_controls
+    return found, cache_hits, state_changes, gated_controls, controls_probed, controls_skipped_budget
 
 
 # Values safe to type into a discovery form. Nothing here should read as real
@@ -792,7 +813,14 @@ async def crawl(
 
         discovered: List[Tuple[str, str]] = []
         if probe_buttons_enabled and node.controls:
-            button_finds, cache_hits, state_changes, gated_controls = await probe_buttons(
+            (
+                button_finds,
+                cache_hits,
+                state_changes,
+                gated_controls,
+                controls_probed,
+                controls_skipped_budget,
+            ) = await probe_buttons(
                 controller,
                 node.final_url,
                 node.controls,
@@ -808,6 +836,8 @@ async def crawl(
             site.probe_cache_hits += cache_hits
             node.state_changing_controls = state_changes
             node.gated_controls = gated_controls
+            node.controls_probed = controls_probed
+            node.controls_skipped_budget = controls_skipped_budget
             for tgt, via in button_finds:
                 if tgt not in seen:
                     discovered.append((tgt, via))

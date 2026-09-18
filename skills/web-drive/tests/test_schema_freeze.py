@@ -17,6 +17,7 @@ from engine.catalog import (
     ReconciliationKind,
     RouteNode,
     SiteMap,
+    SurfaceForm,
 )
 
 
@@ -58,7 +59,10 @@ def test_route_node_schema_is_frozen():
     §4.1) -- a same-URL SPA state change (a wizard step) or a disabled-button click
     used to be silently indistinguishable from a true no-op toggle; both are now
     named so a multi-step flow leaves a lead in `map`'s own output instead of
-    vanishing entirely."""
+    vanishing entirely. v1.9 added `controls_probed`/`controls_skipped_budget`
+    (BUGS.md 2026-08-26) -- the probe budget is spent in DOM order, so a page
+    whose primary CTA renders last can be starved by app-shell chrome with
+    nothing in the output revealing a control was simply never clicked."""
     node = RouteNode(path="/a", url="https://e.com/a", final_url="https://e.com/a", status=200)
     assert set(node.to_dict().keys()) == {
         "path",
@@ -76,6 +80,8 @@ def test_route_node_schema_is_frozen():
         "forms",
         "state_changing_controls",
         "gated_controls",
+        "controls_probed",
+        "controls_skipped_budget",
     }
 
 
@@ -98,6 +104,22 @@ def test_page_surface_schema_is_frozen():
 
 def test_landmark_and_control_and_form_field_schemas_are_frozen():
     assert set(Landmark(role="main").to_dict().keys()) == {"role", "name", "selector"}
+
+
+def test_surface_form_schema_is_frozen():
+    """v1.9 added `implicit` (BUGS.md 2026-09-16) -- a form-less multi-step
+    wizard's fields now fall back to one whole-document group, and `implicit`
+    is what tells the agent that group's `selector` is not a real submit
+    boundary, unlike an ordinary `<form>` capture."""
+    assert set(SurfaceForm(selector="form").to_dict().keys()) == {
+        "selector",
+        "role_name",
+        "fields",
+        "submit_selector",
+        "submit_text",
+        "destructive",
+        "implicit",
+    }
 
 
 def test_reconciliation_schema_is_frozen():

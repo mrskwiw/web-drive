@@ -50,6 +50,10 @@ ONBOARDING_PAGE = b"""<!doctype html><title>Onboarding</title>
 </button>
 """
 
+DISABLED_PAGE = b"""<!doctype html><title>Gated</title>
+<button id="locked" disabled>Do The Thing</button>
+"""
+
 DASHBOARD_PAGE = b"""<!doctype html><title>Dashboard</title>
 <script>
   if (!localStorage.getItem('onboarded')) { location.replace('/onboarding'); }
@@ -63,6 +67,7 @@ PAGES = {
     "/form": FORM_PAGE,
     "/onboarding": ONBOARDING_PAGE,
     "/dashboard": DASHBOARD_PAGE,
+    "/gated": DISABLED_PAGE,
 }
 
 
@@ -143,6 +148,20 @@ def test_probe_finds_undocumented_precondition():
 
     findings = _by_kind(result, "undocumented_precondition")
     assert any(r["subject"] == "Finish setup" for r in findings), result
+
+
+def test_probe_does_not_flag_a_disabled_by_design_control_as_advertised_absent():
+    """BUGS.md 2026-09-16: `probe_control` used to click blind, so a disabled
+    control timed out identically to a genuinely dead one and came out
+    ADVERTISED_ABSENT -- which spec §3 defines as 'withhold the verb, never
+    runnable'. Live against content-jumpstart.com every one of 17 such
+    findings was this shape (a gated wizard step, a gated submit, a gated
+    Connect button), none of them real breakage."""
+    with _server() as base:
+        result = _probe(base + "/gated")
+
+    absent = _by_kind(result, "advertised_absent")
+    assert not any(r["subject"] == "Do The Thing" for r in absent), result
 
 
 def test_probe_writes_output_file(tmp_path):

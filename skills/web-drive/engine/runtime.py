@@ -25,6 +25,7 @@ import click
 
 from .browser import BrowserController
 from .extract import extract_records
+from .flow import MissingSecretError, resolve_str
 from .models import BrowserEngine
 from .verify import VerifyResult, verify_capability
 
@@ -89,9 +90,32 @@ def _run_capability(
     timeout_ms = int(kwargs.get("timeout_ms") or 15000)
 
     steps: List[Dict[str, Any]] = cap.get("steps", [])
+    env = {**os.environ, **{k: str(v) for k, v in values.items()}}
 
     if dry_run:
-        click.echo(json.dumps({"verb": cap["verb"], "dry_run": True, "steps": steps}, indent=2))
+        # BUGS.md 2026-09-17: this used to echo `steps` verbatim -- the catalog's
+        # raw `${NAME}` templates, never what the flags on THIS invocation would
+        # actually send. A preview a user can't tell apart from the unfilled
+        # template defeats the point of `--dry-run` for exactly the case it
+        # exists for: checking what a mutating/destructive verb is about to do
+        # before spending `--yes` on it. Resolve through the same
+        # `flow.resolve_str` substitution `verify_capability` uses, still
+        # without launching a browser. A missing secret is real preview-time
+        # information, not a crash -- reported per-step instead of raised.
+        resolved_steps: List[Dict[str, Any]] = []
+        for step in steps:
+            resolved = dict(step)
+            for field_name in ("selector", "url", "text", "value"):
+                if field_name not in resolved:
+                    continue
+                try:
+                    resolved[field_name] = resolve_str(resolved[field_name], env)
+                except MissingSecretError as exc:
+                    resolved[field_name] = f"<unresolved: missing secret {exc}>"
+            resolved_steps.append(resolved)
+        click.echo(
+            json.dumps({"verb": cap["verb"], "dry_run": True, "steps": resolved_steps}, indent=2)
+        )
         raise SystemExit(EXIT_OK)
 
     if (cap.get("destructive") or cap.get("costs")) and not yes:
@@ -124,8 +148,6 @@ def _run_capability(
             )
         )
         raise SystemExit(EXIT_PRECONDITION_FAILED)
-
-    env = {**os.environ, **{k: str(v) for k, v in values.items()}}
 
     async def run() -> tuple[VerifyResult, List[Dict[str, Any]]]:
         controller = BrowserController(

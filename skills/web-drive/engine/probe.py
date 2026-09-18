@@ -76,6 +76,18 @@ async def probe_control(
     await controller.navigate(origin_url)
     before_url = controller.page.url
     try:
+        if await controller.page.is_disabled(selector):
+            # BUGS.md 2026-09-16: a disabled-by-design control (a wizard step
+            # gated behind completing the prior one, a submit gated behind
+            # required fields, a "Connect" gated behind a selection) used to
+            # time out the click exactly like a genuinely dead button and come
+            # out as ADVERTISED_ABSENT -- which per spec means "withhold the
+            # verb, never runnable". On a live 19-route app every one of 17
+            # such findings was this shape, not real breakage. A disabled
+            # control isn't claiming to do anything yet, so it isn't a finding
+            # at all -- naming what it's gated ON (if worth doing) is the
+            # agent's job, same as `map`'s `gated_controls`.
+            return None
         await controller.page.click(selector, timeout=5000)
         await controller.page.wait_for_load_state("domcontentloaded", timeout=5000)
     except Exception as exc:  # noqa: BLE001 — the failure itself IS the finding

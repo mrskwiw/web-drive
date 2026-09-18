@@ -73,11 +73,24 @@ LOGIN_PAGE = b"""<!doctype html><title>Log in</title>
 </form>
 </body>"""
 
+WIZARD_PAGE = b"""<!doctype html><title>Quiz Info</title>
+<body>
+<main>
+  <h1>Quiz Info</h1>
+  <label for="qtitle">Title</label>
+  <input id="qtitle" name="title" type="text" required>
+  <label for="qcat">Category</label>
+  <select id="qcat" name="category"><option>Science</option><option>History</option></select>
+  <button id="next-step">Continue</button>
+</main>
+</body>"""
+
 PAGES = {
     "/form": FORM_PAGE,
     "/content": CONTENT_PAGE,
     "/status": STATUS_PAGE,
     "/login": LOGIN_PAGE,
+    "/wizard": WIZARD_PAGE,
 }
 
 
@@ -226,6 +239,33 @@ def test_read_does_not_misclassify_a_login_form_as_destructive():
     login_form = surface["forms"][0]
     assert login_form["submit_text"] == "Sign in"
     assert login_form["destructive"] is False
+
+
+def test_read_falls_back_to_a_whole_document_implicit_form_when_no_form_tag_exists():
+    """BUGS.md 2026-09-16: a JS-managed multi-step wizard (found live on
+    quizsquirrel.com's /quiz/create) has real input/select fields in a
+    controlled-component tree with its own submit handler, not a native
+    <form>. Reporting forms: [] for such a page silently hides the whole
+    capability surface a verb author needs."""
+    with _server() as base:
+        surface = _read(base + "/wizard")
+
+    assert len(surface["forms"]) == 1
+    group = surface["forms"][0]
+    assert group["implicit"] is True
+    by_name = {f["name"]: f for f in group["fields"]}
+    assert by_name["title"]["required"] is True
+    assert by_name["category"]["options"] == ["Science", "History"]
+    assert group["submit_text"] == "Continue"
+
+
+def test_read_reports_no_implicit_form_when_the_page_has_no_input_fields():
+    """The fallback must trigger on absence of a <form> tag AND presence of
+    real fields -- a form-less content page with no inputs at all (e.g. a
+    dashboard) must still report forms: [], not a spurious empty group."""
+    with _server() as base:
+        surface = _read(base + "/content")
+    assert surface["forms"] == []
 
 
 def test_read_writes_output_file(tmp_path):
