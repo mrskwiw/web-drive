@@ -348,7 +348,7 @@ good as the evidence that produced it.
 
 ```bash
 python -m engine.cli verify --url <URL> --verb "quiz list" \
-    --steps steps.json --assert assert.json [--destructive --yes] \
+    --steps steps.json --assert assert.json [--destructive --costs --yes] \
     --output verify-result.json
 ```
 
@@ -377,6 +377,17 @@ against a target you don't own — ship it as `unverified` with the reason
 instead. `verify` performs the real action every time it succeeds: a login
 verifies by actually signing in, a delete verifies by actually deleting. Pair
 a destructive verb's verification with a cleanup recipe where one exists.
+
+**`--costs` is the same gate for a verb that spends real credits or
+third-party money WITHOUT being destructive** (a paid research tool, a paid
+generation's "Confirm & start") — content-jumpstart.com's `research run`
+(200 credits) is exactly this shape, and before v1.7 it had zero engine-level
+protection: nothing but your own judgment stood between running it and a real
+charge. Declare it with `--costs`, same refuse-without-`--yes` mechanics as
+`--destructive`, and record what it actually costs in the capability's
+`"costs"` field (e.g. `{"credits": 200}`) once verified — a future run of
+`verify`/the generated driver refuses it exactly like a destructive verb
+until the same explicit confirmation is given again.
 
 **Record the proof in the catalog, not just in your own head.** When a
 `verify` run passes, always pass `--output <path>` and carry that path

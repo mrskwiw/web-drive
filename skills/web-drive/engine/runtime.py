@@ -94,13 +94,18 @@ def _run_capability(
         click.echo(json.dumps({"verb": cap["verb"], "dry_run": True, "steps": steps}, indent=2))
         raise SystemExit(EXIT_OK)
 
-    if cap.get("destructive") and not yes:
+    if (cap.get("destructive") or cap.get("costs")) and not yes:
+        reasons = []
+        if cap.get("destructive"):
+            reasons.append("destructive")
+        if cap.get("costs"):
+            reasons.append("costed")
         click.echo(
             json.dumps(
                 {
                     "verb": cap["verb"],
                     "verified": False,
-                    "reason": "refused: destructive verb requires --yes",
+                    "reason": f"refused: {'/'.join(reasons)} verb requires --yes",
                 }
             )
         )
@@ -163,7 +168,12 @@ def _make_verb_command(site: Dict[str, Any], cap: Dict[str, Any]) -> click.Comma
     _, _, verb_part = cap["verb"].partition(" ")
     params: List[click.Parameter] = [_param_option(p) for p in cap.get("params", [])]
     params += [
-        click.Option(["--yes"], is_flag=True, default=False, help="Confirm a destructive verb."),
+        click.Option(
+            ["--yes"],
+            is_flag=True,
+            default=False,
+            help="Confirm a destructive and/or costed verb.",
+        ),
         click.Option(["--json", "as_json"], is_flag=True, default=False, help="JSON output."),
         click.Option(
             ["--dry-run"], is_flag=True, default=False, help="Print steps without executing."

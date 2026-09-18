@@ -150,6 +150,7 @@ _GOLDEN_SITE_JSON = {
             "summary": "List items.",
             "kind": "read",
             "destructive": False,
+            "costs": None,
             "preconditions": ["auth"],
             "params": [],
             "steps": [],
@@ -200,15 +201,25 @@ def test_site_json_top_level_schema_is_frozen():
 
 
 def test_site_json_capability_schema_is_frozen():
-    """The fields `runtime.py` actually consumes (verb/kind/destructive/
+    """The fields `runtime.py` actually consumes (verb/kind/destructive/costs/
     preconditions/params/steps/assert/extract) plus the generation-time
-    provenance fields (summary/verified_at/evidence/confirm) spec §5 carries."""
+    provenance fields (summary/verified_at/evidence/confirm) spec §5 carries.
+
+    `costs` (v1.7): distinct from `destructive` -- a capability that spends
+    real credits or third-party money but leaves nothing destructive behind
+    (content-jumpstart.com's `research run`, 200 credits) was previously
+    ungated entirely: only `destructive` required `--yes`, so nothing in the
+    engine stopped a costed-but-non-destructive verb from spending on first
+    try. Same refusal gate as `destructive`, just naming a different reason a
+    verb needs explicit confirmation before `verify`/the generated driver
+    will really perform it."""
     cap = _GOLDEN_SITE_JSON["capabilities"][0]
     assert set(cap.keys()) == {
         "verb",
         "summary",
         "kind",
         "destructive",
+        "costs",
         "preconditions",
         "params",
         "steps",

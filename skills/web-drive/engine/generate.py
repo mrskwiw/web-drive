@@ -151,8 +151,13 @@ def render_siteguide(catalog: Dict[str, Any]) -> str:
     for cap in catalog.get("capabilities", []):
         verb = cap["verb"]
         kind = cap.get("kind", "read")
-        destructive = " — **destructive, needs --yes**" if cap.get("destructive") else ""
-        lines.append(f"### `{verb}` ({kind}){destructive}")
+        needs_yes = []
+        if cap.get("destructive"):
+            needs_yes.append("destructive")
+        if cap.get("costs"):
+            needs_yes.append("costs credits/money")
+        flag = f" — **{', '.join(needs_yes)}, needs --yes**" if needs_yes else ""
+        lines.append(f"### `{verb}` ({kind}){flag}")
         if cap.get("summary"):
             lines.append("")
             lines.append(cap["summary"])

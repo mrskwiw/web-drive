@@ -368,3 +368,59 @@ def test_verify_runs_a_destructive_candidate_with_yes(tmp_path):
     assert res.exit_code == 0, res.output
     result = json.loads(res.output)
     assert result["verified"] is True
+
+
+def test_verify_refuses_a_costed_candidate_without_yes(tmp_path):
+    """`--costs` is `--destructive`'s sibling gate: a candidate that spends
+    real credits or money but leaves nothing destructive behind (a research
+    tool, a paid-generation confirm) was previously ungated entirely --
+    nothing stopped it from spending on the very first `verify` attempt.
+    """
+    steps_path = _write(tmp_path, "steps.json", [{"type": "click", "selector": "#go"}])
+
+    with _server() as base:
+        res = _invoke(
+            [
+                "verify",
+                "--url",
+                base + "/search",
+                "--verb",
+                "research run",
+                "--steps",
+                steps_path,
+                "--costs",
+            ]
+        )
+
+    assert res.exit_code == 4, res.output
+    result = json.loads(res.output)
+    assert result["verified"] is False
+    assert "refused" in result["reason"]
+    assert "costed" in result["reason"]
+    assert result["steps"] == []
+
+
+def test_verify_runs_a_costed_candidate_with_yes(tmp_path):
+    steps_path = _write(tmp_path, "steps.json", [{"type": "click", "selector": "#go"}])
+    assert_path = _write(tmp_path, "assert.json", {"content_contains": "Results for"})
+
+    with _server() as base:
+        res = _invoke(
+            [
+                "verify",
+                "--url",
+                base + "/search",
+                "--verb",
+                "research run",
+                "--steps",
+                steps_path,
+                "--assert",
+                assert_path,
+                "--costs",
+                "--yes",
+            ]
+        )
+
+    assert res.exit_code == 0, res.output
+    result = json.loads(res.output)
+    assert result["verified"] is True

@@ -376,6 +376,69 @@ def test_runtime_destructive_verb_runs_with_yes():
     assert json.loads(res.output)["verified"] is True
 
 
+def _costed_catalog(base_url: str) -> dict:
+    """A capability that spends real credits/money without being destructive
+    -- content-jumpstart.com's `research run` (200 credits) is the real-world
+    shape. Reuses the fixture page's create-button action rather than
+    inventing new HTML: what matters here is the gate, not the page."""
+    return {
+        "schema_version": "1.0",
+        "site": {
+            "slug": "fixture",
+            "base_url": base_url,
+            "generated_at": "2026-09-17",
+            "fingerprint": {"title": "Quiz Squirrel Fixture"},
+        },
+        "auth": {"required": False},
+        "capabilities": [
+            {
+                "verb": "quiz research",
+                "summary": "Run a paid research tool.",
+                "kind": "mutating",
+                "destructive": False,
+                "costs": {"credits": 50},
+                "preconditions": [],
+                "params": [],
+                "steps": [
+                    {"type": "fill", "selector": "#title-field", "value": "Trees Quiz"},
+                    {"type": "click", "selector": "#create-btn"},
+                ],
+                "assert": {"content_contains": "Created: Trees Quiz!"},
+            },
+        ],
+        "unverified": [],
+        "reconciliation": [],
+    }
+
+
+def test_runtime_costed_verb_refuses_without_yes():
+    """`costs` is `destructive`'s sibling gate (v1.7): a capability that
+    spends real credits/money but isn't destructive was previously ungated
+    entirely at the driver level -- nothing stopped `research run` from
+    spending on the very first invocation."""
+    with _server() as base:
+        site = _costed_catalog(base)
+        app = build_cli(site)
+        res = CliRunner().invoke(app, ["quiz", "research"])
+
+    if res.exception and "playwright" in str(res.exception).lower():
+        _skip_if_no_chromium(res.exception)
+    assert res.exit_code == 4, res.output
+    assert "costed" in res.output
+
+
+def test_runtime_costed_verb_runs_with_yes():
+    with _server() as base:
+        site = _costed_catalog(base)
+        app = build_cli(site)
+        res = CliRunner().invoke(app, ["quiz", "research", "--yes", "--json"])
+
+    if res.exception:
+        _skip_if_no_chromium(res.exception)
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output)["verified"] is True
+
+
 def test_runtime_failed_assertion_exits_1():
     with _server() as base:
         site = _catalog(base)

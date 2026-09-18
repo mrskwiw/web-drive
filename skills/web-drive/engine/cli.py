@@ -2,8 +2,8 @@
 
 Ships ``map`` (route-graph crawl), ``read`` (one page's declared surface),
 ``probe`` (check a claim against what navigation proves), ``verify`` (execute
-a candidate capability), and ``extract`` (container/field specs -> structured
-records). ``generate`` (Phase G, the driver/runtime) is not built yet — see
+a candidate capability), ``extract`` (container/field specs -> structured
+records), and ``generate`` (render a driver from a capability catalog) — see
 ``docs/WEB_DRIVE_SPECIFICATION.md``.
 
 Session bundles are the SAME format web-qa's ``flow --save-session`` writes, so
@@ -518,7 +518,20 @@ def probe(
     "means really performing it, so it requires explicit confirmation.",
 )
 @click.option(
-    "--yes", is_flag=True, default=False, help="Confirm running a --destructive candidate."
+    "--costs/--no-costs",
+    default=False,
+    help="Declare this candidate costed -- spends real credits or money even "
+    "though it is not destructive (a research tool, a paid generation confirm). "
+    "Same gate as --destructive: refuses to run (exit 4) unless --yes is also "
+    "passed. Distinct from --destructive because a costed action often leaves "
+    "no destructive trace to undo, so it was previously ungated entirely --"
+    "nothing stopped `research run` from spending real credits on first try.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Confirm running a --destructive and/or --costs candidate.",
 )
 @click.option(
     "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
@@ -558,6 +571,7 @@ def verify(
     steps_path: str,
     assert_file: str | None,
     destructive: bool,
+    costs: bool,
     yes: bool,
     engine: str,
     headless: bool,
@@ -576,13 +590,18 @@ def verify(
     caveats" (spec §5's verify-or-withhold discipline).
 
     Exit codes: 0 verified, 1 ran but did not verify, 4 refused (destructive
-    without --yes).
+    or costed without --yes).
     """
-    if destructive and not yes:
+    if (destructive or costs) and not yes:
+        reasons = []
+        if destructive:
+            reasons.append("destructive")
+        if costs:
+            reasons.append("costed")
         refused: dict[str, Any] = {
             "verb": verb,
             "verified": False,
-            "reason": "refused: destructive candidate requires --yes",
+            "reason": f"refused: {'/'.join(reasons)} candidate requires --yes",
             "steps": [],
         }
         _emit(refused, output)
