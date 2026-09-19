@@ -1796,3 +1796,57 @@ def test_map_falls_back_to_label_priority_when_every_control_ties_at_one_rank():
     )
     assert root["controls"][0]["rank"] == 0
 
+
+_UNIFORM_MAIN_CTA_INDEX = (
+    b"<!doctype html><title>Uniform Main CTA</title><body>"
+    b"<main><button>Delete</button><button>Edit</button><button>Archive</button></main>"
+    b"</body>"
+)
+
+
+class _UniformMainCtaHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = _UNIFORM_MAIN_CTA_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _uniform_main_cta_server():
+    srv = _Server(("127.0.0.1", 0), _UniformMainCtaHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_map_does_not_apply_the_rank_fallback_to_a_page_with_several_real_main_ctas():
+    """Post-commit Codex review (2026-09-19), high severity, confirmed valid:
+    the original guard checked only that every control shares ONE rank, not
+    that the shared rank is the UNRANKED default (4) -- a page with several
+    legitimate main-CTA buttons and nothing else ALSO has every element at
+    one rank (0, a real positive landmark match), and the buggy guard would
+    have run the label guess over it too, demoting "Delete"/"Edit"/"Archive"
+    (matching neither keyword list) from their correct rank 0. Only a page
+    where every element is UNRANKED (4) may trigger the fallback."""
+    with _uniform_main_cta_server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0")
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    ranks = {c["rank"] for c in root["controls"]}
+    assert ranks == {0}, (
+        f"three real main CTAs sharing a legitimate rank must not be "
+        f"reclassified by the RNW fallback: {root['controls']}"
+    )
+

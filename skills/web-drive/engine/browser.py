@@ -332,19 +332,25 @@ _SNAPSHOT_JS = r"""
 
   // React Native Web renders every control as `button.css-<hash> >> nth=N`
   // with no semantic landmark, so the location-based rank above can't tell
-  // any of them apart -- every element ties at rank 4, and a stable sort
-  // over an all-tied list is equivalent to plain DOM order. On isekaizero's
-  // storyline page that put the one control that mattered ("Start Now") at
-  // position 77 of 78, past a `--max-probes 12` budget spent entirely on nav
-  // chrome (BUGS.md 2026-08-26). Detection is deliberately narrow: only
-  // triggers when EVERY element shares the identical primary rank -- the
-  // primary ranker learned NOTHING at all -- never as a general tie-breaker,
-  // so a normal page where two elements happen to share one rank keeps
-  // today's stable DOM-order behavior completely unchanged. Overwrites
+  // any of them apart -- every element falls through to the UNRANKED
+  // default (4), and a stable sort over an all-4 list is equivalent to
+  // plain DOM order. On isekaizero's storyline page that put the one
+  // control that mattered ("Start Now") at position 77 of 78, past a
+  // `--max-probes 12` budget spent entirely on nav chrome (BUGS.md
+  // 2026-08-26). Detection must check the UNRANKED VALUE, not merely that
+  // ranks are equal (post-commit review, 2026-09-19): a page with several
+  // legitimate main-CTA buttons and nothing else ALSO has every element
+  // sharing one rank (0, a real positive identification, not "the ranker
+  // learned nothing") -- an equal-ranks-only check would have run the
+  // label guess over that page too and demoted a CTA whose label matches
+  // neither keyword list (e.g. "Delete", "Edit") down from its correct
+  // rank 0. Only rank 4 means the primary ranker found nothing at all;
+  // ranks 0-3 are each a real landmark match and must never be
+  // second-guessed by a keyword heuristic, uniform or not. Overwrites
   // `rank` itself (not just array order) so the reported field stays
   // consistent with its own documented contract ("0 = primary CTA")
   // regardless of which mechanism produced it.
-  if (interactive.length > 1 && new Set(interactive.map((x) => x.rank)).size === 1) {
+  if (interactive.length > 1 && interactive.every((x) => x.rank === 4)) {
     const HIGH = /\b(start|play|begin|create|continue|next|go|launch|submit|join|enter|open)\b/i;
     const LOW = /\b(home|profile|settings|notifications?|menu|back|cancel|close|log\s*out|help|about)\b/i;
     for (const x of interactive) {
