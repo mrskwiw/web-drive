@@ -319,14 +319,19 @@ async def probe_buttons(
 
     Returns ``(found, cache_hits, state_changes, gated_controls, controls_probed,
     controls_skipped_budget)``. The last two are BUGS.md 2026-08-26's disclosure
-    fix: the budget is spent in DOM order (no ranking pass here), so a page whose
-    primary CTA is control 77 of 78 can be starved by app-shell chrome before the
-    crawl ever reaches it -- and the old return tuple had no way to say that
-    happened. `controls_skipped_budget` counts probe-safe, not-yet-probed
-    candidates the crawl declined to click purely because the budget ran out,
-    computed via a lookahead at the exhaustion point rather than by removing the
-    early `break` -- so `found`/`cache_hits`/ordering are unchanged from before,
-    the count is additive-only.
+    fix (part a): the budget is spent in the order ``_SNAPSHOT_JS`` ranked
+    ``controls`` in (part b, also 2026-08-26, added later the same investigation
+    -- a label-priority fallback for the case that motivated this entry, where
+    every control ties at one rank on a React Native Web page and a stable sort
+    is equivalent to DOM order). The fallback is a heuristic, not a guarantee:
+    a page whose primary CTA's label matches neither of its keyword lists can
+    still be starved by app-shell chrome before the crawl ever reaches it, and
+    the old return tuple had no way to say that happened either way.
+    `controls_skipped_budget` counts probe-safe, not-yet-probed candidates the
+    crawl declined to click purely because the budget ran out, computed via a
+    lookahead at the exhaustion point rather than by removing the early
+    `break` -- so `found`/`cache_hits`/ordering are unchanged from before, the
+    count is additive-only.
     """
     found: List[Tuple[str, str]] = []
     state_changes: List[str] = []

@@ -330,6 +330,28 @@ _SNAPSHOT_JS = r"""
     forms.push({ selector: sel(f), fields, submit: submitEl ? sel(submitEl) : null, destructive });
   }
 
+  // React Native Web renders every control as `button.css-<hash> >> nth=N`
+  // with no semantic landmark, so the location-based rank above can't tell
+  // any of them apart -- every element ties at rank 4, and a stable sort
+  // over an all-tied list is equivalent to plain DOM order. On isekaizero's
+  // storyline page that put the one control that mattered ("Start Now") at
+  // position 77 of 78, past a `--max-probes 12` budget spent entirely on nav
+  // chrome (BUGS.md 2026-08-26). Detection is deliberately narrow: only
+  // triggers when EVERY element shares the identical primary rank -- the
+  // primary ranker learned NOTHING at all -- never as a general tie-breaker,
+  // so a normal page where two elements happen to share one rank keeps
+  // today's stable DOM-order behavior completely unchanged. Overwrites
+  // `rank` itself (not just array order) so the reported field stays
+  // consistent with its own documented contract ("0 = primary CTA")
+  // regardless of which mechanism produced it.
+  if (interactive.length > 1 && new Set(interactive.map((x) => x.rank)).size === 1) {
+    const HIGH = /\b(start|play|begin|create|continue|next|go|launch|submit|join|enter|open)\b/i;
+    const LOW = /\b(home|profile|settings|notifications?|menu|back|cancel|close|log\s*out|help|about)\b/i;
+    for (const x of interactive) {
+      x.rank = HIGH.test(x.text) ? 0 : LOW.test(x.text) ? 2 : 1;
+    }
+  }
+
   interactive.sort((a, b) => a.rank - b.rank);
   return { interactive, forms, links, incomplete };
 }

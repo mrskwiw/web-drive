@@ -1740,3 +1740,59 @@ def test_map_does_not_exempt_a_second_destructive_submit_in_the_same_form():
         "exempted just because the resolved submitEl says 'Sign in'"
     )
 
+
+_FLAT_RANK_INDEX = (
+    b"<!doctype html><title>Flat Rank</title><body>"
+    b"<button>Home</button><button>Profile</button><button>Notifications</button>"
+    b"<button>Settings</button><button>Menu</button><button>Help</button>"
+    b"<button>Start Now</button>"
+    b"</body>"
+)
+
+
+class _FlatRankHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = _FLAT_RANK_INDEX
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _flat_rank_server():
+    srv = _Server(("127.0.0.1", 0), _FlatRankHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_map_falls_back_to_label_priority_when_every_control_ties_at_one_rank():
+    """BUGS.md 2026-08-26 (part b): on a page with no semantic landmarks
+    (React Native Web's shape), every control ties at rank 4 and a stable
+    sort is equivalent to plain DOM order -- the DOM-order probe budget in
+    `probe_buttons` then never reaches a control that renders late, which is
+    exactly how isekaizero.com's one meaningful "Start Now" button (control
+    77 of 78) went unprobed under `--max-probes 12`. `node.controls` -- what
+    `probe_buttons` actually iterates -- must now sort the one action-shaped
+    label to the front even though it is LAST in the DOM.
+    """
+    with _flat_rank_server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0")
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    assert root["controls"][0]["text"] == "Start Now", (
+        f"the one action-shaped label did not sort to the front: {root['controls']}"
+    )
+    assert root["controls"][0]["rank"] == 0
+

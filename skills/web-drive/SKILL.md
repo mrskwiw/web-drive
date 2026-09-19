@@ -172,11 +172,16 @@ unit of coverage*, which is the opposite thing — removing them shrinks the map
 
 - `--max-probes` (12) — button probes per route. Unlimited, a 146-control page
   spends ~650 requests on itself and breadth-first never leaves depth 1
-  (measured: 13 routes uncapped vs 20 at 8). The budget is spent in DOM order
-  with no ranking pass, so a page whose primary CTA renders last (React Native
-  Web ties every control at one rank, or the control just sits after a long
-  app-shell chrome list) can be starved before the crawl ever reaches it.
-  Every route now discloses `controls_probed`/`controls_skipped_budget`, so
+  (measured: 13 routes uncapped vs 20 at 8). The budget is spent in the
+  order `_SNAPSHOT_JS` ranks controls, which is landmark-based (nav/form/CTA)
+  and falls back to label priority (start/play/begin/… over
+  home/profile/notifications/…) only when every control on a page ties at
+  one rank — the React Native Web shape, where a page's primary CTA used to
+  simply render last and never get reached. The fallback is a heuristic, not
+  a guarantee: a control whose label matches neither keyword list still
+  falls back to DOM order among its peers, so app-shell chrome can still
+  crowd out a page-specific control the fallback doesn't recognize. Every
+  route now discloses `controls_probed`/`controls_skipped_budget`, so
   "we clicked 12 of 63 probe-safe buttons" is a fact you can read off the map
   instead of infer — a route with a nonzero `controls_skipped_budget` is worth
   a manual `read`/`probe` pass on, the same way a `capped` map is.
