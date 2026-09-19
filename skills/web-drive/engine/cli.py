@@ -50,14 +50,56 @@ from .verify import verify_capability
 
 _ENGINE_CHOICE = click.Choice([e.value for e in BrowserEngine])
 
+# BUGS.md 2026-08-21: `content_after` can run to 20,000 chars (~10k tokens) and
+# appears once per step, so a multi-step `verify` run's page text alone can
+# dominate the agent's context budget for no benefit once the full text is
+# safely on disk. Echoing a bounded excerpt instead -- only once --output is
+# given, so nothing is ever silently lost relative to today's behavior -- lets
+# an agent judge outcomes from the excerpt and read the file deliberately when
+# it needs more, instead of paying for the whole 20k on every single step.
+_STDOUT_EXCERPT_CHARS = 500
+
+
+def _truncate_for_stdout(value: Any, output: str) -> Any:
+    """Recursively copy ``value``, shortening any ``content_after`` string for
+    the STDOUT echo only. The full value is what gets written to ``output``;
+    this never touches the payload that ``_emit`` passes to ``write_text``.
+    """
+    if isinstance(value, dict):
+        result: Dict[str, Any] = {}
+        for k, v in value.items():
+            if (
+                k == "content_after"
+                and isinstance(v, str)
+                and len(v) > _STDOUT_EXCERPT_CHARS
+            ):
+                result[k] = (
+                    v[:_STDOUT_EXCERPT_CHARS]
+                    + f"\n\n[stdout truncated: showing {_STDOUT_EXCERPT_CHARS} of "
+                    f"{len(v)} chars -- full content in {output}]"
+                )
+            else:
+                result[k] = _truncate_for_stdout(v, output)
+        return result
+    if isinstance(value, list):
+        return [_truncate_for_stdout(v, output) for v in value]
+    return value
+
 
 def _emit(payload: Dict[str, Any], output: str | None) -> None:
-    """Print JSON to stdout, and also write it to ``output`` when given."""
+    """Print JSON to stdout, and also write it to ``output`` when given.
+
+    Omitting ``output`` keeps today's behaviour exactly as-is (full content on
+    stdout) -- only PASSING ``--output`` can shrink what's echoed, and even
+    then the file on disk always carries the untruncated payload.
+    """
     text = json.dumps(payload, indent=2)
     if output:
         Path(output).parent.mkdir(parents=True, exist_ok=True)
         Path(output).write_text(text, encoding="utf-8")
-    click.echo(text)
+        click.echo(json.dumps(_truncate_for_stdout(payload, output), indent=2))
+    else:
+        click.echo(text)
 
 
 def _load_session(session: str | None) -> tuple[Any, str | None]:

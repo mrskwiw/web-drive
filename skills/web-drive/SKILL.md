@@ -466,6 +466,16 @@ string. `assert.json` is the CAPABILITY-level assertion (the worked example's
 `{"content_contains": "..."}` or `{"url_contains": "..."}` etc. — same key
 vocabulary as a per-step `assert`), checked against the last step's evidence.
 
+**Pass `--output` whenever you'll judge the produced content afterward.**
+Each step's `content_after` can run to 20,000 chars (BUGS.md 2026-08-21) — on
+a multi-step capability that alone can dominate your context budget for no
+benefit once the full text is on disk. Passing `--output <file>` makes
+stdout show only a ~500-char excerpt per step (with a `[stdout truncated:
+showing N of M chars — full content in <file>]` marker); the file always
+holds the untruncated result. Omit `--output` and stdout stays full-length
+exactly as before. Read the file when the excerpt isn't enough to judge the
+outcome.
+
 This is the whole point of **verify-or-withhold** (spec §5): a candidate only
 becomes a runnable verb if this command actually ran it and it actually
 passed — every step's own deterministic gate (console errors, HTTP status,
