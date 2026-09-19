@@ -1552,3 +1552,191 @@ def test_fonts_are_never_in_the_asset_blocklist():
     )
     assert "*.png" in _BLOCKED_URL_PATTERNS, "the blocklist must still block images"
 
+
+_LOGIN_WITH_SIGNUP_LINK = (
+    b"<!doctype html><title>Log in</title><body>"
+    b"<form id='login'>"
+    b"<input name='email' type='email'>"
+    b"<input name='password' type='password'>"
+    b"<button type='submit'>Sign in</button>"
+    b"<p>Don't have an account? <a href='/register'>Sign up</a></p>"
+    b"</form>"
+    b"<form id='delete-account'>"
+    b"<input name='confirm' type='text'>"
+    b"<button type='submit'>Delete my account</button>"
+    b"</form>"
+    b"</body>"
+)
+
+
+class _LoginSignupHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = _LOGIN_WITH_SIGNUP_LINK
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _login_signup_server():
+    srv = _Server(("127.0.0.1", 0), _LoginSignupHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_map_does_not_misclassify_a_login_form_with_a_signup_cross_link():
+    """BUGS.md 2026-09-16/18: a login form's own text includes a nested "Don't
+    have an account? Sign up" cross-link inside the SAME <form> -- "sign up"
+    alone used to satisfy the whole-form DESTRUCTIVE regex in the shared
+    `_SNAPSHOT_JS` and misclassify an ordinary, idempotent login as
+    destructive. The submit itself says "Sign in", so it must now be exempt
+    regardless of the cross-link. A second, genuinely destructive form on the
+    same page proves the fix does not widen into a blanket exemption -- only a
+    login-shaped SUBMIT is spared.
+    """
+    with _login_signup_server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0")
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    login_form = next(
+        f for f in root["forms"] if any(x["name"] == "password" for x in f["fields"])
+    )
+    assert login_form["destructive"] is False, (
+        "login form misclassified destructive by its own signup cross-link"
+    )
+    delete_form = next(
+        f for f in root["forms"] if any(x["name"] == "confirm" for x in f["fields"])
+    )
+    assert delete_form["destructive"] is True, (
+        "genuinely destructive form must still be flagged -- the fix must not "
+        "widen into a blanket exemption"
+    )
+
+
+_LOGIN_WITH_SECOND_SUBMIT = (
+    b"<!doctype html><title>Account</title><body>"
+    b"<form id='account'>"
+    b"<input name='email' type='email'>"
+    b"<input name='password' type='password'>"
+    b"<button type='submit' name='action' value='login'>Sign in</button>"
+    b"<button type='submit' name='action' value='delete'>Delete account</button>"
+    b"</form>"
+    b"</body>"
+)
+
+
+class _LoginSecondSubmitHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = _LOGIN_WITH_SECOND_SUBMIT
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _login_second_submit_server():
+    srv = _Server(("127.0.0.1", 0), _LoginSecondSubmitHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+_LOGIN_WITH_EXTERNAL_SUBMIT = (
+    b"<!doctype html><title>Account</title><body>"
+    b"<form id='account'>"
+    b"<input name='email' type='email'>"
+    b"<input name='password' type='password'>"
+    b"<button type='submit'>Sign in</button>"
+    b"</form>"
+    b"<button type='submit' form='account'>Delete account</button>"
+    b"</body>"
+)
+
+
+class _LoginExternalSubmitHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        body = _LOGIN_WITH_EXTERNAL_SUBMIT
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextmanager
+def _login_external_submit_server():
+    srv = _Server(("127.0.0.1", 0), _LoginExternalSubmitHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_map_counts_a_form_id_associated_external_submit_too():
+    """Second post-commit Codex review round (2026-09-18): HTML lets a submit
+    control live OUTSIDE the <form> element and still submit it via
+    `form="id"`. Round 1's fix counted only descendant submit controls, so a
+    page with one descendant "Sign in" button and an EXTERNAL
+    `<button form="account">Delete account</button>` would have counted
+    exactly one candidate and wrongly exempted the form. The candidate count
+    must resolve association the way the browser does (`el.form`), not by
+    descendant position, and the whole-form text scan must fold in the
+    external candidate's own label too.
+    """
+    with _login_external_submit_server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0")
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    assert root["forms"][0]["destructive"] is True, (
+        "an externally-associated (form='id') destructive submit must still "
+        "count toward the exactly-one check"
+    )
+
+
+def test_map_does_not_exempt_a_second_destructive_submit_in_the_same_form():
+    """Post-commit Codex review (2026-09-18) of the login-exemption fix above:
+    `submitEl` resolves to only ONE winner by priority order, so a single
+    <form> with TWO submit buttons ("Sign in" AND "Delete account") must not
+    have the second action's risk hidden just because the priority chain
+    happened to pick the login one. With two submit candidates the exemption
+    does not apply -- this form must still come out destructive."""
+    with _login_second_submit_server() as base:
+        site = _map(base, "--delay-ms", "0", "--max-rpm", "0")
+
+    root = next(r for r in site["routes"] if r["path"] == "/")
+    assert root["forms"][0]["destructive"] is True, (
+        "a form with a second, genuinely destructive submit must not be "
+        "exempted just because the resolved submitEl says 'Sign in'"
+    )
+

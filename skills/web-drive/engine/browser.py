@@ -272,14 +272,61 @@ _SNAPSHOT_JS = r"""
       f.querySelector('input[type=image]') ||
       (nonSubmit.length ? nonSubmit[nonSubmit.length - 1] : null) ||
       f.querySelector('button');
-    const text = (f.innerText || '').toLowerCase();
+    // Every submit-capable control ASSOCIATED with this form, not just its
+    // descendants -- HTML lets `form="id"` submit-associate a control living
+    // anywhere else in the document, and such a control still fires this
+    // form's submit despite living outside it (post-commit review,
+    // 2026-09-18, round 2). `el.form` is the browser's own association
+    // resolution (handles both nesting and `form=""`, and ignores a
+    // `form=""` that doesn't resolve to any real form), so filtering the
+    // whole document by it is correct where string-matching an id attribute
+    // would not be.
+    const isSubmitCapable = (el) => {
+      const tag = el.tagName;
+      if (tag === 'BUTTON') {
+        const t = (el.getAttribute('type') || 'submit').toLowerCase();
+        return t !== 'button' && t !== 'reset';
+      }
+      if (tag === 'INPUT') {
+        const t = (el.getAttribute('type') || '').toLowerCase();
+        return t === 'submit' || t === 'image';
+      }
+      return false;
+    };
+    const submitCandidates = Array.prototype.filter.call(
+      document.querySelectorAll('button, input'),
+      (el) => el.form === f && isSubmitCapable(el)
+    );
+    // The whole-form DESTRUCTIVE scan below reads `f.innerText`, which is
+    // DESCENDANTS ONLY -- an externally form-associated control's own text
+    // ("Delete account" on a `form="id"` button living outside the <form>)
+    // is invisible to it. Fold each such external candidate's own label in,
+    // so a destructive external submit is still caught by the fallback scan
+    // even where the login exemption below does not fire.
+    const externalText = submitCandidates
+      .filter((el) => !f.contains(el))
+      .map((el) => (el.innerText || el.value || ''))
+      .join(' ');
+    const text = ((f.innerText || '') + ' ' + externalText).toLowerCase();
     // A password field alone is NOT destructive — a login is idempotent auth,
     // not a record-creating action. Flag on destructive wording, or on a
     // password field that is NOT on a login form (likely registration / set-password).
     const DESTRUCTIVE = /\b(pay|checkout|purchase|place order|delete|remove|cancel account|unsubscribe|sign\s*up|register|create account)\b/;
     const LOGIN = /\b(log\s*in|sign\s*in)\b/;
     const hasPassword = fields.some((x) => x.type === 'password');
-    const destructive = DESTRUCTIVE.test(text) || (hasPassword && !LOGIN.test(text));
+    // A form whose OWN (and ONLY) submit is a login action is never destructive,
+    // no matter what else the whole form's text contains -- a login commonly
+    // nests a "Don't have an account? Sign up" cross-link inside the SAME
+    // <form>, and "sign up" alone would otherwise satisfy DESTRUCTIVE against
+    // the whole-form text above (found live on quizsquirrel.com's /login,
+    // 2026-09-16/18). Gated on exactly ONE submit-capable control associated
+    // with the form: `submitEl` above resolves to only ONE winner by priority
+    // order, so a form with a SECOND, genuinely destructive submit (descendant
+    // or externally `form="id"`-associated) must not have that second action's
+    // risk hidden behind whichever button the priority chain happened to pick.
+    const submitText = (submitEl ? (submitEl.innerText || submitEl.value || '') : '').toLowerCase();
+    const isLoginSubmit = submitCandidates.length === 1 && LOGIN.test(submitText);
+    const destructive = !isLoginSubmit && (DESTRUCTIVE.test(text) || (hasPassword && !LOGIN.test(text)));
     forms.push({ selector: sel(f), fields, submit: submitEl ? sel(submitEl) : null, destructive });
   }
 
