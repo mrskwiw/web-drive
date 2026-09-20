@@ -150,6 +150,14 @@ assumed** — a session is bound to the UA+IP fingerprint it was issued under
 default Chromium UA fails looking exactly like an expired token, not a
 fingerprint mismatch, which sends you re-authenticating when that cannot help.
 
+**Both paths capture ONE origin — the site you're actually on.** If the
+app keeps auth state on a separate identity/app subdomain (a different
+origin from the page you exported), the bundle can be syntactically valid
+and still missing what that other origin needs, and the replay fails
+looking exactly like an expired session rather than an incomplete one.
+**Verify the replay is actually authenticated** before trusting the bundle
+for anything further — don't just confirm the file loaded without error.
+
 ## Workflow
 
 ### 0. Map the route graph
