@@ -432,6 +432,17 @@ _LOW_MEMORY_ARGS = [
 ]
 
 
+def _low_memory_args(engine: BrowserEngine, low_memory: bool) -> List[str]:
+    """Chromium-only. `_LOW_MEMORY_ARGS` are Chromium command-line switches; passing
+    them to a firefox/webkit launch would choke that engine (post-commit review,
+    2026-09-22), so --low-memory is a correctly-silent no-op there. It is a
+    best-effort footprint optimization, not a correctness feature, so skipping it on
+    an engine that cannot honor these switches is the right behavior, not a failure."""
+    if low_memory and engine is BrowserEngine.CHROMIUM:
+        return list(_LOW_MEMORY_ARGS)
+    return []
+
+
 class BrowserController:
     """Drive a single page and capture its observable state."""
 
@@ -510,8 +521,9 @@ class BrowserController:
         self._pw = await async_playwright().start()
         browser_type = getattr(self._pw, self._engine.value)
         launch_kwargs: dict = {"headless": self._headless, "slow_mo": self._slowmo}
-        if self._low_memory:
-            launch_kwargs["args"] = _LOW_MEMORY_ARGS
+        args = _low_memory_args(self._engine, self._low_memory)
+        if args:
+            launch_kwargs["args"] = args
         self._browser = await browser_type.launch(**launch_kwargs)
         ctx_kwargs: dict = {"viewport": self._viewport}
         if self._user_agent:

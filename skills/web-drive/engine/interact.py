@@ -105,10 +105,26 @@ _FINGERPRINT_JS = """
 () => {
   const title = document.title + '|';
   const textOf = (el) => ((el && el.innerText) || '').trim();
+  // A mounted-but-hidden node still has innerText, so tier 1 MUST check visibility
+  // (post-commit review, 2026-09-22): many SPAs keep a `[role="dialog"]` in the DOM
+  // permanently and only show it on demand -- without this a hidden dialog would be
+  // falsely reported as open. Tier 2's `elementsFromPoint` is already visibility-safe.
+  const visible = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0';
+  };
   const page = () => title + ((document.body && document.body.innerText) || '').slice(0, 800);
 
-  const explicit = document.querySelector('dialog[open], [role="dialog"], [aria-modal="true"]');
-  if (explicit && textOf(explicit)) {
+  // querySelectorAll + find-first-visible, not querySelector: several dialogs may be
+  // mounted (hidden) and only one shown -- the first in DOM order can be a hidden one.
+  const explicit = Array.prototype.find.call(
+    document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"]'),
+    (el) => visible(el) && textOf(el)
+  );
+  if (explicit) {
     return title + '[overlay] ' + textOf(explicit).slice(0, 800);
   }
 

@@ -60,12 +60,34 @@ _OVERLAY_PAGE = (
     "document.body.appendChild(d);\">Start Now</button>"
 ).encode()
 
+# BUGS.md 2026-09-22 (post-commit review): a `[role="dialog"]` mounted-but-HIDDEN
+# (the common SPA pattern -- keep it in the DOM, show on demand) must NOT be read as
+# an open overlay just because it carries innerText. A hidden dialog is present here
+# from load; a separate button makes an ordinary (non-overlay) content change.
+_HIDDEN_DIALOG_PAGE = (
+    "<!doctype html><title>Hidden Dialog Fixture</title>"
+    "<h1>Page</h1>"
+    # Change target FIRST, so the ordinary change lands INSIDE the fingerprint's
+    # first-800-chars page-text window -- otherwise this would accidentally test the
+    # unrelated (pre-existing) 800-char truncation limit rather than the overlay fix.
+    "<button id='change' onclick=\"document.getElementById('out').textContent="
+    "'ORDINARY-CHANGE-NOW'\">Do thing</button>"
+    "<div id='out'></div>"
+    "<div role='dialog' style='display:none'>SECRET-HIDDEN-MODAL never shown</div>"
+    f"<p>{_FILLER}</p>"
+).encode()
+
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):  # noqa: N802
-        body = _OVERLAY_PAGE if self.path.startswith("/overlay") else _PAGE
+        if self.path.startswith("/overlay"):
+            body = _OVERLAY_PAGE
+        elif self.path.startswith("/hidden-dialog"):
+            body = _HIDDEN_DIALOG_PAGE
+        else:
+            body = _PAGE
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -346,6 +368,7 @@ def test_pick_page_refuses_to_guess_between_two_non_internal_pages():
     with pytest.raises(InteractError, match="non-internal pages are open"):
         _pick_page(browser)
 
+
 def test_click_that_only_opens_an_overlay_is_reported_as_changed(tmp_path):
     """A click whose ONLY effect is opening a modal must not read as a dead click.
 
@@ -388,5 +411,37 @@ def test_click_that_only_opens_an_overlay_is_reported_as_changed(tmp_path):
             r = _interact("read", "--state", state)
             assert r.returncode == 0
             assert "How do you want to play" in json.loads(r.stdout)["content_preview"]
+        finally:
+            _interact("stop", "--state", state)
+
+
+def test_a_mounted_but_hidden_dialog_is_not_read_as_an_open_overlay(tmp_path):
+    """Regression for the post-commit review of the overlay fingerprint (2026-09-22):
+    tier-1 dialog detection must check VISIBILITY. A `[role="dialog"]` kept mounted
+    but `display:none` (the common SPA pattern) has innerText, so a text-only check
+    would falsely report it as open. Also confirms an ordinary content change still
+    registers as `changed` (not swallowed, not misread as an overlay)."""
+    state = str(tmp_path / "hidden.json")
+
+    with _server() as base:
+        r = _interact("start", "--url", f"{base}/hidden-dialog", "--state", state, "--headless")
+        if r.returncode != 0:
+            _skip_if_no_chromium(r.stdout + r.stderr)
+            raise AssertionError(f"start failed: {r.stdout}\n{r.stderr}")
+        try:
+            r = _interact("read", "--state", state)
+            assert r.returncode == 0, r.stderr
+            preview = json.loads(r.stdout)["content_preview"]
+            assert "[overlay]" not in preview, "a hidden dialog must not be seen as open"
+            assert "SECRET-HIDDEN-MODAL" not in preview, "hidden dialog text must not surface"
+
+            r = _interact("click", "--state", state, "--text", "Do thing")
+            assert r.returncode == 0, r.stderr
+            clicked = json.loads(r.stdout)
+            assert clicked["changed"] is True, "an ordinary content change must still register"
+            assert "[overlay]" not in clicked["content_preview"], (
+                "an ordinary change is not an overlay"
+            )
+            assert "ORDINARY-CHANGE-NOW" in clicked["content_preview"]
         finally:
             _interact("stop", "--state", state)
