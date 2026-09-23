@@ -412,6 +412,25 @@ _BLOCKED_URL_PATTERNS = [
     "*.ico", "*.bmp", "*.mp4", "*.webm", "*.mp3", "*.wav", "*.ogg",
 ]
 
+# COMPLETION_AND_OPTIMIZATION_PLAN.md v2.2, X-M1 (2026-09-22): opt-in, conservative
+# Chromium flags that cut per-instance baseline RSS in headless/automation contexts.
+# Matters most for `SKILL.md`'s fan-out orchestration, where ~4-6 of these launch
+# concurrently -- every flag here is paid once per subagent. Deliberately does NOT
+# include `--single-process`: it destabilizes Playwright's own CDP connection and
+# would trade a memory saving for flaky runs, which is a worse failure mode than the
+# memory pressure this flag exists to reduce.
+_LOW_MEMORY_ARGS = [
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
+]
+
 
 class BrowserController:
     """Drive a single page and capture its observable state."""
@@ -428,8 +447,10 @@ class BrowserController:
         storage_state: Optional[Any] = None,
         user_agent: Optional[str] = None,
         block_assets: bool = False,
+        low_memory: bool = False,
     ) -> None:
         self._block_assets = block_assets
+        self._low_memory = low_memory
         # How asset blocking actually resolved, set by launch(). Carried into the
         # sitemap so "I asked for blocking" and "blocking happened" can never
         # again be assumed to be the same statement.
@@ -488,9 +509,10 @@ class BrowserController:
     async def launch(self) -> None:
         self._pw = await async_playwright().start()
         browser_type = getattr(self._pw, self._engine.value)
-        self._browser = await browser_type.launch(
-            headless=self._headless, slow_mo=self._slowmo
-        )
+        launch_kwargs: dict = {"headless": self._headless, "slow_mo": self._slowmo}
+        if self._low_memory:
+            launch_kwargs["args"] = _LOW_MEMORY_ARGS
+        self._browser = await browser_type.launch(**launch_kwargs)
         ctx_kwargs: dict = {"viewport": self._viewport}
         if self._user_agent:
             ctx_kwargs["user_agent"] = self._user_agent

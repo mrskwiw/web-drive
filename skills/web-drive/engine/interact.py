@@ -47,6 +47,24 @@ from playwright.async_api import async_playwright
 
 _STATE_SCHEMA = 1
 
+# COMPLETION_AND_OPTIMIZATION_PLAN.md v2.2, X-M1/X-M5 (2026-09-22): this session is
+# a DETACHED process that can outlive the agent turn that started it (see module
+# docstring) -- exactly the case where an unreduced Chromium baseline lingers
+# longest if `stop` is forgotten. `--no-first-run` is already unconditional below;
+# these are the rest of browser.py's `_LOW_MEMORY_ARGS`. No `--single-process`,
+# same reason as there: it destabilizes the CDP connection this whole mechanism
+# depends on.
+_LOW_MEMORY_EXTRA_ARGS = [
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--mute-audio",
+]
+
 
 class InteractError(Exception):
     """A user-facing interact failure (bad state file, port never came up, ...)."""
@@ -61,16 +79,77 @@ def _read_state(state_path: str) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+# BUGS.md 2026-09-22: an overlay that opens WITHOUT changing the URL used to be
+# invisible here. The fingerprint was `title + body.innerText.slice(0, 800)`, and
+# on a content-rich page the first 800 characters are all nav/hero/body text --
+# so isekaizero.ai's "How do you want to play?" dialog, opened by the click we had
+# just made, reported `changed: false` and never reached `content_preview`. A click
+# that really did something read as a dead click, and the NEXT click then failed
+# with a pointer-interception timeout against the very overlay we had not noticed.
+#
+# An open overlay is therefore checked FIRST and, when found, IS the fingerprint.
+# Two tiers, because standards-compliant dialog markup is not what every framework
+# emits: React Native Web gave us a bare `<div role="presentation">`, which matches
+# none of the ARIA dialog selectors.
+#   Tier 1 -- real dialog semantics, cheap and unambiguous.
+#   Tier 2 -- a positional probe. `elementsFromPoint` at a 3x3 grid of viewport
+#     samples returns each point's topmost-first stack, so a layer painted OVER the
+#     page is found without walking (and calling getComputedStyle on) the whole DOM.
+#     A grid rather than just the centre because a bottom sheet or top banner covers
+#     no centre point -- isekaizero's own sheet sat entirely below the midline.
+# Tier 2 is deliberately narrow (positioned, stacked above the page, covering real
+# area, carrying real text) so an ordinary sticky header does not read as a modal.
+# It is a heuristic, not a guarantee: an untextured or tiny overlay still falls
+# through to the page-text path, same as the rank fallback in `browser.py`.
+_FINGERPRINT_JS = """
+() => {
+  const title = document.title + '|';
+  const textOf = (el) => ((el && el.innerText) || '').trim();
+  const page = () => title + ((document.body && document.body.innerText) || '').slice(0, 800);
+
+  const explicit = document.querySelector('dialog[open], [role="dialog"], [aria-modal="true"]');
+  if (explicit && textOf(explicit)) {
+    return title + '[overlay] ' + textOf(explicit).slice(0, 800);
+  }
+
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (!vw || !vh || !document.body) return page();
+  const minArea = vw * vh * 0.12;
+  let best = null, bestZ = 0;
+  for (const fx of [0.5, 0.2, 0.8]) {
+    for (const fy of [0.5, 0.8, 0.2]) {
+      let stack = [];
+      try { stack = document.elementsFromPoint(vw * fx, vh * fy) || []; } catch (e) { continue; }
+      for (const el of stack) {
+        if (el === document.body || el === document.documentElement) break;
+        const cs = getComputedStyle(el);
+        if (cs.position !== 'fixed' && cs.position !== 'absolute') continue;
+        const z = parseInt(cs.zIndex, 10);
+        if (!Number.isFinite(z) || z < 1) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width * r.height < minArea) continue;
+        if (!textOf(el)) continue;
+        if (z >= bestZ) { bestZ = z; best = el; }
+        break;
+      }
+    }
+  }
+  return best ? title + '[overlay] ' + textOf(best).slice(0, 800) : page();
+}
+"""
+
+
 async def _fingerprint(page: Any) -> str:
     """Same cheap same-page change signal as sitemap.py's crawler, against a
     raw Playwright Page instead of a BrowserController (interact never owns
     a BrowserController -- its whole point is a browser that outlives the
-    Python process that launched it)."""
+    Python process that launched it).
+
+    Overlay-aware: an open dialog/sheet is reported in place of the page text,
+    so a click whose only effect was to open one is never reported as a no-op.
+    """
     try:
-        return await page.evaluate(
-            "() => document.title + '|' + "
-            "((document.body && document.body.innerText) || '').slice(0, 800)"
-        )
+        return await page.evaluate(_FINGERPRINT_JS)
     except Exception:  # noqa: BLE001 — a page mid-navigation has no stable content to read
         return ""
 
@@ -100,6 +179,47 @@ async def _chromium_executable() -> str:
         return p.chromium.executable_path
 
 
+def _find_system_chrome() -> str:
+    """Locate the REAL, installed Google Chrome binary -- not Playwright's bundled
+    Chromium.
+
+    The point (CLAUDE.md governing stance): a HUMAN-driven session that has to get
+    past a wall which flags automation-Chromium -- Cloudflare, a login the operator
+    clears by hand -- is best served by a browser whose fingerprint simply IS a real
+    Chrome's, because it is one. The tool still only observes; the operator drives
+    and clears the wall. This is NOT evasion machinery (no webdriver masking, no
+    synthetic input) -- it is using the real browser instead of a stand-in.
+
+    Windows/mac/linux standard install locations only. For any other binary --
+    Edge, Brave, a specific channel build, a portable install -- pass an explicit
+    path instead (respects the operator's own browser-driving choices)."""
+    candidates: list[Path] = []
+    if sys.platform == "win32":
+        for base in filter(None, [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
+        ]):
+            candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    elif sys.platform == "darwin":
+        candidates.append(
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        )
+    else:
+        candidates += [
+            Path("/usr/bin/google-chrome"),
+            Path("/usr/bin/google-chrome-stable"),
+            Path("/opt/google/chrome/chrome"),
+        ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    raise InteractError(
+        "could not find an installed Google Chrome. Pass --chrome-path <path> to "
+        "point at a specific browser binary (Chrome/Edge/Brave/a channel build)."
+    )
+
+
 def start_session(
     state_path: str,
     url: str,
@@ -107,6 +227,10 @@ def start_session(
     user_agent: Optional[str] = None,
     headless: bool = True,
     timeout_s: float = 10.0,
+    low_memory: bool = False,
+    chrome_path: Optional[str] = None,
+    real_chrome: bool = False,
+    user_data_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     if Path(state_path).exists():
         raise InteractError(
@@ -120,8 +244,35 @@ def start_session(
         storage_state = bundle.get("storage_state")
         user_agent = user_agent or bundle.get("user_agent")
 
-    executable = asyncio.run(_chromium_executable())
-    profile_dir = Path(tempfile.mkdtemp(prefix="wd-interact-"))
+    # Which browser binary. Explicit path wins; then --real-chrome auto-resolve;
+    # else Playwright's bundled Chromium (the historical default).
+    if chrome_path:
+        executable = chrome_path
+        if not Path(executable).exists():
+            raise InteractError(f"--chrome-path {executable!r} does not exist")
+    elif real_chrome:
+        executable = _find_system_chrome()
+    else:
+        executable = asyncio.run(_chromium_executable())
+
+    # Which profile. A persistent --user-data-dir survives `stop` (login / a
+    # cleared challenge is reused next session); the default throwaway temp dir
+    # does not. `stop`'s rmtree already only ever touches a `wd-interact-` temp
+    # dir, so a persistent dir is protected from deletion for free.
+    persistent = bool(user_data_dir)
+    if persistent:
+        profile_dir = Path(user_data_dir)  # type: ignore[arg-type]
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        # A reused profile keeps a stale DevToolsActivePort from its last run;
+        # remove it so `_devtools_port` reads THIS launch's port, not the old one.
+        (profile_dir / "DevToolsActivePort").unlink(missing_ok=True)
+    else:
+        profile_dir = Path(tempfile.mkdtemp(prefix="wd-interact-"))
+
+    def _cleanup_dir() -> None:
+        if not persistent:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+
     args = [
         executable,
         f"--user-data-dir={profile_dir}",
@@ -133,6 +284,8 @@ def start_session(
         args.append("--headless=new")
     if user_agent:
         args.append(f"--user-agent={user_agent}")
+    if low_memory:
+        args.extend(_LOW_MEMORY_EXTRA_ARGS)
 
     popen_kwargs: Dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
@@ -148,16 +301,20 @@ def start_session(
     try:
         proc = subprocess.Popen(args, **popen_kwargs)
     except OSError as exc:
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        _cleanup_dir()
+        hint = (
+            "run `playwright install chromium`"
+            if executable == "" or "ms-playwright" in executable
+            else "check the --chrome-path / --real-chrome binary exists and is runnable"
+        )
         raise InteractError(
-            f"could not launch chromium at {executable!r}: {exc}. "
-            f"Executable doesn't exist -- run `playwright install chromium`."
+            f"could not launch browser at {executable!r}: {exc}. {hint}."
         ) from exc
     try:
         port = _devtools_port(profile_dir, timeout_s)
     except InteractError:
         proc.kill()
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        _cleanup_dir()
         raise
 
     async def _setup() -> Dict[str, Any]:
@@ -195,7 +352,7 @@ def start_session(
         result = asyncio.run(_setup())
     except Exception:
         proc.kill()
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        _cleanup_dir()
         raise
 
     Path(state_path).write_text(
@@ -205,6 +362,8 @@ def start_session(
                 "pid": proc.pid,
                 "port": port,
                 "profile_dir": str(profile_dir),
+                "persistent": persistent,
+                "executable": executable,
                 "entry_url": url,
             },
             indent=2,

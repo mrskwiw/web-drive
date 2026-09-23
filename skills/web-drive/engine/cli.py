@@ -116,6 +116,7 @@ def _controller(
     session: str | None = None,
     user_agent: str | None = None,
     block_assets: bool = False,
+    low_memory: bool = False,
 ) -> BrowserController:
     """Build a controller, seeding a saved auth session when provided.
 
@@ -130,6 +131,7 @@ def _controller(
         storage_state=storage_state,
         user_agent=user_agent or session_ua,
         block_assets=block_assets,
+        low_memory=low_memory,
     )
 
 
@@ -288,6 +290,13 @@ def cli() -> None:
     default=None,
     help="Also write the sitemap JSON here.",
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional). Worth it on a long "
+    "exhaustive crawl or when the host is otherwise memory-tight.",
+)
 def map(  # noqa: A001 — the subcommand really is called `map`
     url: str,
     engine: str,
@@ -311,6 +320,7 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     session: str | None,
     user_agent: str | None,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Crawl the same-origin route graph and emit it as JSON.
 
@@ -335,7 +345,9 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     )
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent, block_assets)
+        controller = _controller(
+            engine, headless, session, user_agent, block_assets, low_memory
+        )
         await controller.launch()
         try:
             return await _crawl_until_done(
@@ -406,6 +418,12 @@ def map(  # noqa: A001 — the subcommand really is called `map`
     default=None,
     help="Also write the surface JSON here.",
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional).",
+)
 def read(  # noqa: A001 — the subcommand really is called `read`
     url: str,
     engine: str,
@@ -413,6 +431,7 @@ def read(  # noqa: A001 — the subcommand really is called `read`
     session: str | None,
     user_agent: str | None,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Extract ONE page's declared surface -> `surface.json`.
 
@@ -426,7 +445,9 @@ def read(  # noqa: A001 — the subcommand really is called `read`
     """
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent, False)
+        controller = _controller(
+            engine, headless, session, user_agent, False, low_memory
+        )
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -469,6 +490,13 @@ def read(  # noqa: A001 — the subcommand really is called `read`
     default=None,
     help="Also write the reconciliation JSON here.",
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional). Worth it especially "
+    "with --check-preconditions, which launches a second browser per candidate.",
+)
 def probe(
     url: str,
     engine: str,
@@ -477,6 +505,7 @@ def probe(
     user_agent: str | None,
     check_preconditions: bool,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Navigate candidate transitions from a page's declared surface and
     record what actually happened -> `reconciliation[]` (spec §3).
@@ -494,7 +523,9 @@ def probe(
     """
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent, False)
+        controller = _controller(
+            engine, headless, session, user_agent, False, low_memory
+        )
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -613,6 +644,12 @@ def probe(
     default=None,
     help="Also write the verify-result JSON here.",
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional).",
+)
 def verify(
     url: str,
     verb: str,
@@ -627,6 +664,7 @@ def verify(
     user_agent: str | None,
     save_session_path: str | None,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Execute a candidate capability's steps and report verified/withheld.
 
@@ -661,7 +699,9 @@ def verify(
     )
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent, False)
+        controller = _controller(
+            engine, headless, session, user_agent, False, low_memory
+        )
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -712,6 +752,12 @@ def verify(
     default=None,
     help="Also write the extracted records JSON here.",
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional).",
+)
 def extract(
     url: str,
     spec_path: str,
@@ -720,6 +766,7 @@ def extract(
     session: str | None,
     user_agent: str | None,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Pull structured records from a listing/detail page -> `records.json`.
 
@@ -731,7 +778,9 @@ def extract(
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent, False)
+        controller = _controller(
+            engine, headless, session, user_agent, False, low_memory
+        )
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -960,6 +1009,12 @@ async def wait_for_manual_login(
     "--session replay: tokens are commonly bound to a UA+IP fingerprint, so a "
     "bundle saved under one UA and replayed under another is rejected.",
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional).",
+)
 def login(
     url: str,
     save_path: str,
@@ -969,6 +1024,7 @@ def login(
     engine: str,
     headless: bool,
     user_agent: str | None,
+    low_memory: bool,
 ) -> None:
     """Open a real browser, let a HUMAN authenticate, then save the session.
 
@@ -987,7 +1043,7 @@ def login(
     """
 
     async def run():
-        controller = _controller(engine, headless, None, user_agent, False)
+        controller = _controller(engine, headless, None, user_agent, False, low_memory)
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -1076,6 +1132,39 @@ def interact() -> None:
 @click.option(
     "--timeout-s", default=10.0, type=float, help="How long to wait for chromium to start."
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags. Worth it "
+    "here especially: this process is DETACHED and can outlive the agent turn "
+    "that started it if `stop` is forgotten (see `interact` --help).",
+)
+@click.option(
+    "--chrome-path",
+    default=None,
+    help="Launch this browser BINARY (real Chrome/Edge/Brave/a channel build) "
+    "instead of Playwright's bundled Chromium -- so the fingerprint is a real "
+    "browser's. For a HUMAN-driven session past a wall that flags automation "
+    "Chromium: you drive and clear the wall, this only observes. Not evasion "
+    "(no webdriver masking / synthetic input) -- it IS the real browser.",
+)
+@click.option(
+    "--real-chrome",
+    is_flag=True,
+    default=False,
+    help="Convenience for --chrome-path: auto-locate the installed Google Chrome.",
+)
+@click.option(
+    "--user-data-dir",
+    "user_data_dir",
+    default=None,
+    type=click.Path(),
+    help="Persistent profile dir (SURVIVES `stop`, unlike the default throwaway "
+    "temp profile) -- log in / clear a challenge once by hand, and every later "
+    "session reuses it. Use a DEDICATED dir, never your everyday Chrome's own "
+    "default profile (Chrome refuses remote debugging on that, and it would be "
+    "locked by any running Chrome).",
+)
 def interact_start(
     url: str,
     state_path: str,
@@ -1083,12 +1172,18 @@ def interact_start(
     user_agent: str | None,
     headless: bool,
     timeout_s: float,
+    low_memory: bool,
+    chrome_path: str | None,
+    real_chrome: bool,
+    user_data_dir: str | None,
 ) -> None:
-    """Launch a detached chromium and navigate to --url."""
+    """Launch a detached browser and navigate to --url."""
     try:
         result = start_interact_session(
             state_path, url, session=session, user_agent=user_agent,
-            headless=headless, timeout_s=timeout_s,
+            headless=headless, timeout_s=timeout_s, low_memory=low_memory,
+            chrome_path=chrome_path, real_chrome=real_chrome,
+            user_data_dir=user_data_dir,
         )
     except InteractError as exc:
         click.echo(json.dumps({"error": str(exc)}))

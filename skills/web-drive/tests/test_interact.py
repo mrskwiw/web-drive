@@ -35,15 +35,42 @@ _PAGE = (
 )
 
 
+# BUGS.md 2026-09-22, reproduced from the live isekaizero.ai failure. Three
+# properties matter, and all three are load-bearing:
+#   1. >800 characters of ordinary body text BEFORE the overlay exists, so the old
+#      `body.innerText.slice(0, 800)` fingerprint is saturated by page content and
+#      cannot see the overlay no matter how loud it is;
+#   2. the overlay carries `role="presentation"` and NO aria/dialog semantics --
+#      the React Native Web shape, which defeats every ARIA dialog selector;
+#   3. it is a BOTTOM SHEET, not a centred modal, so a centre-only probe misses it
+#      entirely (isekaizero's own sheet sat wholly below the midline).
+_FILLER = (
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod "
+    "tempor incididunt ut labore et dolore magna aliqua. "
+) * 12
+_OVERLAY_PAGE = (
+    "<!doctype html><title>Overlay Fixture</title>"
+    "<h1>Storyline</h1>"
+    f"<p>{_FILLER}</p>"
+    "<button id='start' onclick=\"var d=document.createElement('div');"
+    "d.setAttribute('role','presentation');"
+    "d.style.cssText='position:fixed;left:0;right:0;bottom:0;height:40%;"
+    "z-index:9999;background:#222;color:#fff';"
+    "d.textContent='How do you want to play? Play as Guest or Sign Up';"
+    "document.body.appendChild(d);\">Start Now</button>"
+).encode()
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):  # noqa: N802
+        body = _OVERLAY_PAGE if self.path.startswith("/overlay") else _PAGE
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(_PAGE)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(_PAGE)
+        self.wfile.write(body)
 
     def log_message(self, *a):
         pass
@@ -318,3 +345,48 @@ def test_pick_page_refuses_to_guess_between_two_non_internal_pages():
 
     with pytest.raises(InteractError, match="non-internal pages are open"):
         _pick_page(browser)
+
+def test_click_that_only_opens_an_overlay_is_reported_as_changed(tmp_path):
+    """A click whose ONLY effect is opening a modal must not read as a dead click.
+
+    Regression guard for BUGS.md 2026-09-22, found live on isekaizero.ai: clicking
+    "Start Now" opened a "How do you want to play?" sheet, and `interact` reported
+    `changed: false` with a `content_preview` full of unrelated page text -- so the
+    click looked inert, and the NEXT click then failed with a pointer-interception
+    timeout against the overlay we had not noticed was there.
+
+    The fixture reproduces all three properties that made it invisible: >800 chars
+    of body text ahead of the overlay, `role="presentation"` instead of any ARIA
+    dialog semantics, and a bottom sheet rather than a centred modal. Verified to
+    FAIL against the old `title + body.innerText.slice(0, 800)` fingerprint.
+    """
+    state = str(tmp_path / "overlay.json")
+
+    with _server() as base:
+        r = _interact("start", "--url", f"{base}/overlay", "--state", state, "--headless")
+        if r.returncode != 0:
+            _skip_if_no_chromium(r.stdout + r.stderr)
+            raise AssertionError(f"start failed: {r.stdout}\n{r.stderr}")
+        try:
+            before = json.loads(r.stdout)["content_preview"]
+            assert "[overlay]" not in before, "no overlay is open yet"
+
+            r = _interact("click", "--state", state, "--text", "Start Now")
+            assert r.returncode == 0, f"click failed: {r.stdout}\n{r.stderr}"
+            clicked = json.loads(r.stdout)
+
+            assert clicked["navigated"] is False, "the overlay must not change the URL"
+            assert clicked["changed"] is True, (
+                "opening an overlay IS a change -- reporting False here is the bug"
+            )
+            assert "[overlay]" in clicked["content_preview"]
+            assert "How do you want to play" in clicked["content_preview"], (
+                "the overlay's own text, not the page text behind it"
+            )
+
+            # And a separate process reading the same session sees it too.
+            r = _interact("read", "--state", state)
+            assert r.returncode == 0
+            assert "How do you want to play" in json.loads(r.stdout)["content_preview"]
+        finally:
+            _interact("stop", "--state", state)
